@@ -47,7 +47,9 @@ def test_build_plotly_spec_trace_type_mode():
     by_name = {t["name"]: t for t in spec["data"]}
     assert by_name["line_col"]["type"] == "scatter"
     assert by_name["line_col"]["mode"] == "lines"
-    assert by_name["scatter_col"]["type"] == "scattergl"
+    # Plain SVG "scatter", not "scattergl" -- see _trace_type_mode for why
+    # (WebGL rendering proved unreliable in this app's QWebEngineView).
+    assert by_name["scatter_col"]["type"] == "scatter"
     assert by_name["scatter_col"]["mode"] == "markers"
 
 

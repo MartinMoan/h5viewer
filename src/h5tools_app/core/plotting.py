@@ -55,11 +55,16 @@ def _trace_type_mode(chart_type: ChartType) -> dict:
     if chart_type == ChartType.LINE:
         return {"type": "scatter", "mode": "lines"}
     if chart_type == ChartType.SCATTER:
-        # scattergl (WebGL), not scatter -- markers-only traces are the
-        # most point-count-sensitive for smooth pan/zoom; Line/Bar/
-        # Histogram stay SVG-rendered, which is crisper at the row counts
-        # MAX_PLOT_ROWS allows.
-        return {"type": "scattergl", "mode": "markers"}
+        # Plain SVG "scatter" (mode: markers), not "scattergl" -- scattergl
+        # renders via WebGL, and this app has repeatedly hit flaky/failing
+        # GPU contexts in QWebEngineView during development ("GPU state
+        # invalid", failed command buffers). A WebGL trace silently
+        # rendering wrong (e.g. losing its color) when the GPU context is
+        # unhappy, while every other SVG-rendered trace type keeps working
+        # fine, exactly matches "colors work for line plots but not
+        # scatter." At MAX_PLOT_ROWS's cap, plain SVG markers render just
+        # as well as WebGL ones -- not worth the correctness risk.
+        return {"type": "scatter", "mode": "markers"}
     if chart_type == ChartType.BAR:
         return {"type": "bar"}
     return {"type": "histogram"}

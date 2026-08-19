@@ -15,7 +15,16 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QEvent,
+    QItemSelectionModel,
+    QModelIndex,
+    QObject,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -26,6 +35,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QStackedWidget,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -38,6 +50,43 @@ from ..core.h5_model import ColumnLayout, H5Model
 from ..theme import Palette, ThemeManager
 
 POLL_MS = 40
+
+
+def _selected_shade(hex_color: str, dark: bool) -> QColor:
+    """A more saturated version of ``hex_color`` at the same hue, used to
+    highlight a selected cell -- instead of Qt's default flat purple
+    ``Highlight`` overwrite (see ``_NoHighlightDelegate``), which ignored
+    each column's own tint entirely. Muted rather than vivid: "selected"
+    only needs to read as *a shade of this column*, not as a hazard color
+    (dark mode was previously pushed to a fairly bright/saturated
+    mid-tone, e.g. #2f8f4f -- toned that down to a dimmer, still
+    same-hue #2b5d3c; light mode dimming means less saturated/lighter
+    rather than darker, so it reads muted rather than louder)."""
+    base = QColor(hex_color)
+    h, s, _l, _a = base.getHsl()
+    if h < 0 or s < 10:
+        # The default/unstyled column has no real hue to shade (its base
+        # is a plain near-white/near-black gray) -- fall back to the
+        # theme's ordinary selection tint rather than shading nothing.
+        return QColor(c.SELECTION_DARK if dark else c.SELECTION_LIGHT)
+    sat = min(max(s, 95 if dark else 70), 255)
+    lightness = 68 if dark else 215
+    return QColor.fromHsl(h, sat, lightness, 255)
+
+
+class _NoHighlightDelegate(QStyledItemDelegate):
+    """Paints every cell with its real BackgroundRole color, even when
+    selected -- the model already swaps in a shade of the column's own
+    tint for selected cells (see ``DatasetTableModel``/``_selected_shade``
+    above), so this only needs to stop the style from clobbering that with
+    its own flat ``Highlight`` palette color, which is what a selected
+    ``QStyleOptionViewItem`` normally paints instead of BackgroundRole."""
+
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.state &= ~QStyle.StateFlag.State_Selected
+        super().paint(painter, opt, index)
 
 
 def _format_cell(value) -> str:
@@ -68,7 +117,16 @@ class DatasetTableModel(QAbstractTableModel):
         super().__init__(parent)
         self.source = source
         self.layout_info: ColumnLayout = source.layout
+        # Set once the owning QTableView has a model attached (see
+        # DatasetTableView.load) -- QItemSelectionModel doesn't exist
+        # until then, and only the view's selection tells data() which
+        # cells to paint with the "selected" shade instead of the plain
+        # column tint.
+        self._selection_model: Optional[QItemSelectionModel] = None
         self._set_palette(palette)
+
+    def attach_selection_model(self, selection_model: QItemSelectionModel) -> None:
+        self._selection_model = selection_model
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else self.source.row_count
@@ -82,6 +140,8 @@ class DatasetTableModel(QAbstractTableModel):
         row, col = index.row(), index.column()
 
         if role == Qt.ItemDataRole.BackgroundRole:
+            if self._selection_model is not None and self._selection_model.isSelected(index):
+                return self._selected_column_colors[col]
             return self._column_colors[col]
         if role == Qt.ItemDataRole.ForegroundRole:
             arr, _missing = self.source.get_available(row, row + 1)
@@ -127,6 +187,9 @@ class DatasetTableModel(QAbstractTableModel):
 
     def _set_palette(self, palette: Palette) -> None:
         self._column_colors = [QColor(palette.column_color(i)) for i in range(self.layout_info.n_columns)]
+        self._selected_column_colors = [
+            _selected_shade(palette.column_color(i), palette.dark) for i in range(self.layout_info.n_columns)
+        ]
         self._text_color = QColor(palette.text)
         self._placeholder_color = QColor(palette.subtext)
 
@@ -148,6 +211,49 @@ class _DatasetTable(QTableView):
             event.accept()
             return
         super().wheelEvent(event)
+
+
+class _ColumnToggleFilter(QObject):
+    """Installed on the horizontal header's viewport (not the header
+    itself -- see below) to deselect a column on a second plain click,
+    instead of the built-in header-click behavior (wired up automatically
+    by QTableView, see the ExtendedSelection note above), which just
+    re-selects the same already-selected column -- a click has no way to
+    express "actually, never mind" there.
+
+    Swapping in a QHeaderView subclass via setHorizontalHeader() was tried
+    first and rejected: QTableView only wires up its internal
+    press-to-select-column handling for the *original* header instance it
+    creates itself -- replacing it, even with a plain unmodified
+    QHeaderView, silently breaks header-click selection entirely (click
+    does nothing at all, confirmed independent of any subclass logic). An
+    event filter on the existing header's viewport leaves that header
+    instance untouched, so the built-in wiring stays intact; consuming the
+    press (returning True) here stops it from ever reaching that handling
+    for the deselect case, and returning False for every other case lets
+    click-to-select, drag-to-multi-select, resize, move, and sort all keep
+    working exactly as before.
+    """
+
+    def __init__(self, view: QTableView, parent=None):
+        super().__init__(parent)
+        self._view = view
+
+    def eventFilter(self, obj, event) -> bool:
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+        ):
+            header = self._view.horizontalHeader()
+            logical = header.logicalIndexAt(event.position().toPoint())
+            selection_model = self._view.selectionModel()
+            if logical >= 0 and selection_model is not None:
+                selected_cols = selection_model.selectedColumns()
+                if len(selected_cols) == 1 and selected_cols[0].column() == logical:
+                    selection_model.clearSelection()
+                    return True
+        return False
 
 
 class _NavPopover(QFrame):
@@ -291,6 +397,17 @@ class DatasetTableView(QWidget):
         # index internally) -- doesn't touch the model or the underlying
         # file, just the on-screen column order.
         hheader.setSectionsMovable(True)
+        # A second plain click on an already-selected column deselects it
+        # -- see _ColumnToggleFilter for why this is an event filter on
+        # the header's viewport rather than a header subclass.
+        self._column_toggle_filter = _ColumnToggleFilter(self.table, self)
+        hheader.viewport().installEventFilter(self._column_toggle_filter)
+        # Selected cells still get their BackgroundRole re-queried and
+        # painted (see _NoHighlightDelegate) instead of the style's flat
+        # Highlight-palette color, so they can be a shade of their own
+        # column's tint (see DatasetTableModel/_selected_shade) rather
+        # than one fixed purple regardless of column.
+        self.table.setItemDelegate(_NoHighlightDelegate(self.table))
 
         self.empty_label = QLabel("Select a dataset from the tree to view its contents")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -346,6 +463,9 @@ class DatasetTableView(QWidget):
         self._source = DatasetSource(dataset, layout)
         self._table_model = DatasetTableModel(self._source, self._palette)
         self.table.setModel(self._table_model)
+        # QItemSelectionModel is created fresh by setModel() above, so this
+        # can only be wired up after it -- see DatasetTableModel.data().
+        self._table_model.attach_selection_model(self.table.selectionModel())
         self._apply_column_widths(layout)
 
         self._last_context = (node, path, layout)
@@ -432,6 +552,14 @@ class DatasetTableView(QWidget):
                 background-color: {palette.body_bg};
                 gridline-color: {palette.grid_line};
                 border: none;
+                /* Cell fills no longer come from QPalette::Highlight --
+                   _NoHighlightDelegate strips the selected state before
+                   painting, so selected cells use the per-column shade
+                   from DatasetTableModel instead. These two still set
+                   the Highlight/HighlightedText roles Fusion falls back
+                   on elsewhere (e.g. text-selection highlighting inside
+                   an editable field), so they stay, just no longer doing
+                   the job they used to do here. */
                 selection-background-color: {palette.selection};
                 selection-color: {palette.text};
             }}

@@ -52,7 +52,7 @@ from .widgets.hierarchy_tree import HierarchyTree
 from .widgets.status_bar import StatusBar
 from .widgets.title_bar import BAR_HEIGHT, TitleBar
 
-_DEFAULT_W, _DEFAULT_H = 1240, 780
+_DEFAULT_W, _DEFAULT_H = 1320, 840
 _MIN_W, _MIN_H = 860, 560
 _RESIZE_ZONE = 6  # px from a window edge that counts as "start a resize drag"
 
@@ -238,15 +238,31 @@ class App(QWidget):
         # calculation assumes decorations that don't exist here. Doing it
         # ourselves with the screen's exact available geometry sidesteps
         # that entirely.
-        if self._maximized:
-            if self._restore_geometry is not None:
-                self.setGeometry(self._restore_geometry)
-            self._maximized = False
-        else:
-            screen = self.screen() or QApplication.primaryScreen()
-            self._restore_geometry = self.geometry()
-            self.setGeometry(screen.availableGeometry())
-            self._maximized = True
+        #
+        # setGeometry(rect) below is already a single atomic call (move
+        # and resize together, not two separate calls) -- the "moves,
+        # then resizes" look reported on X11/WSLg is Qt painting the
+        # in-between frames as the platform window catches up to the new
+        # geometry, not two separate geometry changes on our end.
+        # setUpdatesEnabled(False) suppresses those intermediate repaints
+        # so only the final, fully-laid-out frame ever hits the screen --
+        # the whole splitter/tree/table subtree would otherwise be
+        # relaid-out and repainted at least once mid-transition for
+        # nothing, which is also most of where the sluggishness comes
+        # from, not the geometry change itself.
+        self.setUpdatesEnabled(False)
+        try:
+            if self._maximized:
+                if self._restore_geometry is not None:
+                    self.setGeometry(self._restore_geometry)
+                self._maximized = False
+            else:
+                screen = self.screen() or QApplication.primaryScreen()
+                self._restore_geometry = self.geometry()
+                self.setGeometry(screen.availableGeometry())
+                self._maximized = True
+        finally:
+            self.setUpdatesEnabled(True)
         self.title_bar.set_maximized(self._maximized)
 
     # -- window chrome: edge resize --------------------------------------

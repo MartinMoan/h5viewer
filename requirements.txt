@@ -1,3 +1,10 @@
+# PySide6-Addons (QtWebEngineWidgets, used by the graph window) is pulled
+# in transitively by the plain PySide6 package below. On Linux, QtWebEngine
+# additionally needs a handful of system Chromium runtime libraries that
+# are NOT pip-installable: libnss3, libnspr4, libasound2(t64), libxkbfile1
+# (Debian/Ubuntu package names -- install via your OS package manager if
+# the graph window fails to import with a "libnspr4.so: cannot open shared
+# object file" style error).
 PySide6>=6.6
 h5py>=3.10
 numpy>=1.26

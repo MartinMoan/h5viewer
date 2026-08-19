@@ -40,6 +40,7 @@ class Palette:
         self.row_hover = c.ROW_HOVER_DARK if dark else c.ROW_HOVER_LIGHT
         self.splitter = c.SPLITTER_DARK if dark else c.SPLITTER_LIGHT
         self.columns = c.COLUMN_PALETTE_DARK if dark else c.COLUMN_PALETTE_LIGHT
+        self.chart_series = c.CHART_SERIES_DARK if dark else c.CHART_SERIES_LIGHT
         self.body_bg = self.columns[0]
         self.window_bg = "#1E1E1E" if dark else "#F5F5F7"
         self.base_bg = "#242424" if dark else "#FFFFFF"
@@ -47,6 +48,12 @@ class Palette:
 
     def column_color(self, index: int) -> str:
         return self.columns[index % len(self.columns)]
+
+    def chart_color(self, index: int) -> str:
+        # A vivid line/marker color for a plotted series -- see
+        # CHART_SERIES_LIGHT/DARK in constants.py for why this isn't just
+        # column_color() reused.
+        return self.chart_series[index % len(self.chart_series)]
 
 
 class ThemeManager(QObject):

@@ -44,6 +44,14 @@ MAX_CACHED_BLOCKS = 400
 # a warning rather than freezing the UI).
 MAX_COLUMNS = 256
 
+# Hard cap on rows read into memory for a "graph selected columns" plot.
+# This is a one-shot bulk read via h5_model.read_rows(), independent of
+# the table's own ROW_BLOCK_SIZE/MAX_CACHED_BLOCKS paging cache -- kept
+# well under that cache's own 80,000-row resident cap, and low enough to
+# keep SVG-mode Plotly traces (Line/Bar/Histogram) panning/zooming
+# smoothly without needing WebGL for every trace type.
+MAX_PLOT_ROWS = 20_000
+
 # Background colors used to tint alternating columns so it's easy to track
 # a column while scrolling vertically through a large table.
 COLUMN_PALETTE_LIGHT = [
@@ -89,3 +97,33 @@ ROW_HOVER_DARK = "#272733"
 
 SPLITTER_LIGHT = "#E3E5EA"
 SPLITTER_DARK = "#303030"
+
+# Truncation/warning text color -- used both for the dataset table's
+# "showing first N of M flattened columns" notice and the graph window's
+# "showing first N of M rows" notice.
+WARN_COLOR_LIGHT = "#8A5A00"
+WARN_COLOR_DARK = "#E0A93B"
+
+# Vivid line/marker colors for the graph window, index-aligned with
+# COLUMN_PALETTE_* so a plotted series' color still matches the hue family
+# of its column's tint in the table -- but NOT the same colors: those are
+# deliberately near-invisible tints meant to sit almost flush with the
+# table's own background (e.g. dark index 1 "#20262E" vs body_bg
+# "#242424"), which made an actual plotted line nearly invisible against
+# the chart background when reused directly as a line color.
+CHART_SERIES_LIGHT = [
+    ACCENT_LIGHT,  # index 0 (the default/unstyled column) -- no real hue of its own
+    "#2563EB",  # blue
+    "#059669",  # green
+    "#D97706",  # orange
+    "#7C3AED",  # purple
+    "#0D9488",  # teal
+]
+CHART_SERIES_DARK = [
+    ACCENT_DARK,
+    "#5B9BFF",  # blue
+    "#4ADE80",  # green
+    "#FB923C",  # orange
+    "#C084FC",  # purple
+    "#2DD4BF",  # teal
+]

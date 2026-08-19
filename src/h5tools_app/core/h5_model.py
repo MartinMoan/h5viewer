@@ -42,10 +42,17 @@ class ColumnLayout:
     field_names: tuple | None
     trailing_shape: tuple
     is_scalar: bool
+    # Parallel to labels: whether each column's dtype is int/uint/float
+    # (explicitly excludes bool and string/object columns) -- used to
+    # decide which columns are offered for plotting.
+    numeric_mask: tuple[bool, ...]
 
     @property
     def n_columns(self) -> int:
         return len(self.labels)
+
+    def numeric_columns(self) -> list[int]:
+        return [i for i, numeric in enumerate(self.numeric_mask) if numeric]
 
 
 class H5ModelError(RuntimeError):
@@ -173,6 +180,12 @@ def _format_attr_value(value) -> str:
     return str(value)
 
 
+def _is_numeric_kind(kind: str) -> bool:
+    # int, unsigned int, float -- explicitly not bool ("b") or
+    # string/bytes/object ("U", "S", "O"), which aren't plottable.
+    return kind in "iuf"
+
+
 def build_column_layout(shape: tuple, dtype: np.dtype, max_columns: int = MAX_COLUMNS) -> ColumnLayout:
     field_names = dtype.names
     is_scalar = len(shape) == 0
@@ -197,11 +210,14 @@ def build_column_layout(shape: tuple, dtype: np.dtype, max_columns: int = MAX_CO
     truncated = total_columns > max_columns
 
     labels: list[str] = []
+    numeric_mask: list[bool] = []
     if not trailing_shape:
         if field_names:
             labels = list(field_names[:max_columns])
+            numeric_mask = [_is_numeric_kind(dtype[f].kind) for f in labels]
         else:
             labels = ["value"]
+            numeric_mask = [_is_numeric_kind(dtype.kind)]
     else:
         ranges = [range(d) for d in trailing_shape]
         count = 0
@@ -210,11 +226,13 @@ def build_column_layout(shape: tuple, dtype: np.dtype, max_columns: int = MAX_CO
             if field_names:
                 for f in field_names:
                     labels.append(f"[{idx_label}].{f}")
+                    numeric_mask.append(_is_numeric_kind(dtype[f].kind))
                     count += 1
                     if count >= max_columns:
                         break
             else:
                 labels.append(f"[{idx_label}]")
+                numeric_mask.append(_is_numeric_kind(dtype.kind))
                 count += 1
             if count >= max_columns:
                 break
@@ -227,6 +245,7 @@ def build_column_layout(shape: tuple, dtype: np.dtype, max_columns: int = MAX_CO
         field_names=field_names,
         trailing_shape=trailing_shape,
         is_scalar=is_scalar,
+        numeric_mask=tuple(numeric_mask),
     )
 
 

@@ -61,6 +61,12 @@ class DatasetSource:
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
 
+    @property
+    def dataset(self) -> h5py.Dataset:
+        """The underlying h5py.Dataset -- for one-shot bulk reads that
+        bypass the block cache entirely (see core/plotting.py)."""
+        return self._dataset
+
     # -- public API ---------------------------------------------------
 
     def get_available(self, start: int, end: int):

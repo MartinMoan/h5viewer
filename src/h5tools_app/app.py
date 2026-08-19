@@ -12,26 +12,18 @@ are no decorations to account for, and ends up positioning the window
 offset from the screen edge -- so maximize/restore is done manually here
 by setting geometry to the screen's available rect instead.
 
-Edge-resize has no reserved margin -- the content sits flush with the
-window edges (VS Code-style), which means there's no bare App-widget
-surface left anywhere for a plain ``mousePressEvent`` override to catch
-resize drags on. Instead, a ``QApplication``-wide event filter inspects
-every mouse press/move in the whole app and checks the *global* cursor
-position against this window's edges, regardless of which child widget
-the event actually landed on. The title bar (and everything in it -- the
-window control buttons, the menu items) is deliberately excluded from
-this: it already handles drag-to-move and its own clicks, and with zero
-margin its top ~6px overlaps those controls, so treating that row as
-resize territory too would make clicking near the top of a button
-sometimes start a resize instead.
+Edge-resize and manual maximize/restore are shared with the graph window
+via ``FramelessWindowMixin`` (``widgets/frameless.py``) -- see that
+module's docstring for the full story, including why the resize event
+filter must be installed per-widget on this window's own descendants
+rather than QApplication-wide (it broke QWebEngineView).
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QRect, Qt
-from PySide6.QtGui import QCursor
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -47,6 +39,7 @@ from .core.h5_model import DATASET, H5Model, H5ModelError, NodeInfo
 from .theme import Palette, ThemeManager
 from .widgets.dataset_table import DatasetTableView
 from .widgets.file_open_dialog import FileOpenDialog
+from .widgets.frameless import FramelessWindowMixin
 from .widgets.group_panel import GroupPanel
 from .widgets.hierarchy_tree import HierarchyTree
 from .widgets.status_bar import StatusBar
@@ -54,23 +47,17 @@ from .widgets.title_bar import BAR_HEIGHT, TitleBar
 
 _DEFAULT_W, _DEFAULT_H = 1320, 840
 _MIN_W, _MIN_H = 860, 560
-_RESIZE_ZONE = 6  # px from a window edge that counts as "start a resize drag"
 
 
-class App(QWidget):
+class App(FramelessWindowMixin, QWidget):
     def __init__(self, initial_path: Optional[str] = None):
         super().__init__()
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(_MIN_W, _MIN_H)
         self.resize(_DEFAULT_W, _DEFAULT_H)
-        self.setMouseTracking(True)
 
         self.model: Optional[H5Model] = None
-        self._maximized = False
-        self._restore_geometry: Optional[QRect] = None
-        self._override_cursor_active = False
         self.theme = ThemeManager(QApplication.instance())
         self.theme.set_mode("dark")
 
@@ -107,6 +94,7 @@ class App(QWidget):
         self.status_bar = StatusBar(self.theme)
         outer.addWidget(self.status_bar)
         self.table_view.context_changed.connect(self.status_bar.set_context)
+        self.table_view.error_message.connect(lambda msg: self.status_bar.set_message(msg, is_error=True))
 
         # A resize cursor set on this widget (see mouseMoveEvent below,
         # only meant for the few pixels of bare margin around the window
@@ -120,17 +108,7 @@ class App(QWidget):
         for child in (self.title_bar, self.splitter, self.status_bar):
             child.setCursor(Qt.CursorShape.ArrowCursor)
 
-        # With zero margins, every pixel of the window is covered by some
-        # child widget -- there's no bare App surface left for a plain
-        # mouseMoveEvent override to see hover motion on. Qt only
-        # dispatches MouseMove without a button held to widgets that opt
-        # in, so every descendant needs tracking on for the QApplication-
-        # wide event filter (below) to observe hover position anywhere in
-        # the window, regardless of which child is actually under the
-        # cursor.
-        for w in self.findChildren(QWidget):
-            w.setMouseTracking(True)
-        QApplication.instance().installEventFilter(self)
+        self._init_frameless(BAR_HEIGHT)
 
         self._center_on_screen()
         self.theme.register(self._apply_palette)
@@ -224,145 +202,18 @@ class App(QWidget):
         self.tree.select_path(path)
 
     def closeEvent(self, event) -> None:
-        QApplication.instance().removeEventFilter(self)
+        self._teardown_frameless()
         self.table_view.clear()
         if self.model is not None:
             self.model.close()
         super().closeEvent(event)
 
-    # -- window chrome: maximize/restore ---------------------------------
+    # -- window chrome -----------------------------------------------------
+    # Maximize/restore and edge-resize live in FramelessWindowMixin, shared
+    # with the graph window -- see widgets/frameless.py.
 
-    def _toggle_maximize(self) -> None:
-        # Not showMaximized(): on a frameless X11 window that reliably
-        # ends up offset from the screen edge, since the WM's maximize
-        # calculation assumes decorations that don't exist here. Doing it
-        # ourselves with the screen's exact available geometry sidesteps
-        # that entirely.
-        #
-        # setGeometry(rect) below is already a single atomic call (move
-        # and resize together, not two separate calls) -- the "moves,
-        # then resizes" look reported on X11/WSLg is Qt painting the
-        # in-between frames as the platform window catches up to the new
-        # geometry, not two separate geometry changes on our end.
-        # setUpdatesEnabled(False) suppresses those intermediate repaints
-        # so only the final, fully-laid-out frame ever hits the screen --
-        # the whole splitter/tree/table subtree would otherwise be
-        # relaid-out and repainted at least once mid-transition for
-        # nothing, which is also most of where the sluggishness comes
-        # from, not the geometry change itself.
-        self.setUpdatesEnabled(False)
-        try:
-            if self._maximized:
-                if self._restore_geometry is not None:
-                    self.setGeometry(self._restore_geometry)
-                self._maximized = False
-            else:
-                screen = self.screen() or QApplication.primaryScreen()
-                self._restore_geometry = self.geometry()
-                self.setGeometry(screen.availableGeometry())
-                self._maximized = True
-        finally:
-            self.setUpdatesEnabled(True)
-        self.title_bar.set_maximized(self._maximized)
-
-    # -- window chrome: edge resize --------------------------------------
-    #
-    # There's no reserved margin any more (see __init__), so no bare
-    # App-widget surface exists for a plain mousePressEvent/mouseMoveEvent
-    # override to catch resize drags on -- every pixel belongs to some
-    # child widget. Instead a QApplication-wide event filter (installed in
-    # __init__, see eventFilter below) inspects every mouse press/move in
-    # the whole app and checks the *global* cursor position against this
-    # window's edges, regardless of which child widget the event actually
-    # landed on. The title bar row is excluded entirely: it already
-    # handles drag-to-move and its own clicks, and with zero margin its
-    # top few px overlap those controls, so treating that row as resize
-    # territory too would make clicking near the top of a button
-    # sometimes start a resize instead.
-
-    def _edges_at(self, x: int, y: int) -> Qt.Edges:
-        m = _RESIZE_ZONE
-        edges = Qt.Edges()
-        if x <= m:
-            edges |= Qt.Edge.LeftEdge
-        if x >= self.width() - m:
-            edges |= Qt.Edge.RightEdge
-        if y <= m:
-            edges |= Qt.Edge.TopEdge
-        if y >= self.height() - m:
-            edges |= Qt.Edge.BottomEdge
-        return edges
-
-    def _cursor_for_edges(self, edges: Qt.Edges) -> Optional[Qt.CursorShape]:
-        # Standard Qt cursor shapes, not custom-drawn ones: this defers to
-        # whatever the platform provides for "resize" cursors. A prior
-        # attempt drew custom bitmaps instead, reasoning that WSLg's X11
-        # session has no configured cursor theme so Qt falls back to its
-        # own bundled bitmaps -- but that made things worse, not better,
-        # so back to the platform default here.
-        has_left = bool(edges & Qt.Edge.LeftEdge)
-        has_right = bool(edges & Qt.Edge.RightEdge)
-        has_top = bool(edges & Qt.Edge.TopEdge)
-        has_bottom = bool(edges & Qt.Edge.BottomEdge)
-        if (has_left and has_top) or (has_right and has_bottom):
-            return Qt.CursorShape.SizeFDiagCursor
-        if (has_right and has_top) or (has_left and has_bottom):
-            return Qt.CursorShape.SizeBDiagCursor
-        if has_left or has_right:
-            return Qt.CursorShape.SizeHorCursor
-        if has_top or has_bottom:
-            return Qt.CursorShape.SizeVerCursor
-        return None
-
-    def _edges_for_global_pos(self, global_pos) -> Qt.Edges:
-        if self._maximized:
-            return Qt.Edges()
-        pos = self.mapFromGlobal(global_pos)
-        if not self.rect().contains(pos) or pos.y() < BAR_HEIGHT:
-            return Qt.Edges()
-        return self._edges_at(pos.x(), pos.y())
-
-    def _set_resize_cursor(self, cursor: Optional[Qt.CursorShape]) -> None:
-        # QApplication.override cursor rather than setCursor() on whatever
-        # widget happens to be under the pointer: the widget under the
-        # pointer changes constantly as the mouse crosses child boundaries
-        # near an edge, and there's no single owner to reliably reset
-        # afterwards the way there was when App had its own bare margin.
-        if cursor is not None:
-            if self._override_cursor_active:
-                QApplication.changeOverrideCursor(QCursor(cursor))
-            else:
-                QApplication.setOverrideCursor(QCursor(cursor))
-                self._override_cursor_active = True
-        elif self._override_cursor_active:
-            QApplication.restoreOverrideCursor()
-            self._override_cursor_active = False
-
-    def eventFilter(self, obj, event) -> bool:
-        etype = event.type()
-        if etype == QEvent.Type.MouseMove and isinstance(obj, QWidget) and obj.window() is self:
-            edges = self._edges_for_global_pos(event.globalPosition().toPoint())
-            self._set_resize_cursor(self._cursor_for_edges(edges))
-        elif (
-            etype == QEvent.Type.MouseButtonPress
-            and isinstance(obj, QWidget)
-            and obj.window() is self
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            edges = self._edges_for_global_pos(event.globalPosition().toPoint())
-            if edges:
-                handle = self.windowHandle()
-                if handle is not None:
-                    handle.startSystemResize(edges)
-                    return True
-        return super().eventFilter(obj, event)
-
-    def leaveEvent(self, event) -> None:
-        # Fires when the pointer leaves the window's total bounds (not
-        # when it moves between children within it), which is the right
-        # moment to make sure a resize cursor doesn't get stuck on.
-        self._set_resize_cursor(None)
-        super().leaveEvent(event)
+    def _on_maximize_changed(self, maximized: bool) -> None:
+        self.title_bar.set_maximized(maximized)
 
     # -- theming ---------------------------------------------------------
 
@@ -423,6 +274,14 @@ class App(QWidget):
 
 
 def main(initial_path: Optional[str] = None) -> None:
+    # Required by Qt WebEngine (see widgets/graph_window.py) *before* the
+    # QApplication exists -- without it, QWebEngineView's separate GPU/
+    # renderer processes don't share GL contexts with the main process,
+    # which showed up here as sporadic Chromium GPU-command-buffer errors
+    # and crashes around graph windows. Harmless no-op for the rest of the
+    # app if WebEngine's system dependencies aren't installed.
+    if QApplication.instance() is None:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication.instance() or QApplication([])
     window = App(initial_path)
     window.show()

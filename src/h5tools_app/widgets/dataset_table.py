@@ -47,7 +47,9 @@ from .. import constants as c
 from .. import icons
 from ..core.dataset_source import DatasetSource
 from ..core.h5_model import ColumnLayout, H5Model
+from ..core.plotting import fetch_columns
 from ..theme import Palette, ThemeManager
+from .graph_config_dialog import GraphConfigDialog
 
 POLL_MS = 40
 
@@ -353,6 +355,10 @@ class DatasetTableView(QWidget):
     # space above the table. See load()/clear() below; this replaces what
     # used to be a title_label/subtitle_label/warning_label row here.
     context_changed = Signal(str)
+    # Emitted when "Make Graph" is clicked without enough numeric columns
+    # selected -- consumed by App to show it in the status bar as an error,
+    # the same channel used for other user-facing error messages there.
+    error_message = Signal(str)
 
     def __init__(self, theme: ThemeManager, parent=None):
         super().__init__(parent)
@@ -361,6 +367,11 @@ class DatasetTableView(QWidget):
         self._source: Optional[DatasetSource] = None
         self._table_model: Optional[DatasetTableModel] = None
         self._last_context: Optional[tuple] = None
+        # Graph windows are independent, non-modal top-level widgets that
+        # outlive whatever dataset happens to be loaded here -- kept alive
+        # by this list (PySide6 would otherwise garbage-collect a shown
+        # widget with no surviving Python reference almost immediately).
+        self._graph_windows: list = []
 
         outer = QVBoxLayout(self)
         # Top margin matches HierarchyTree's own top layout margin (see
@@ -429,6 +440,17 @@ class DatasetTableView(QWidget):
         self.nav_trigger.raise_()
         self._nav_popover = _NavPopover(theme, self)
 
+        # Same floating-corner-button pattern as nav_trigger, positioned
+        # just to its left -- appears only once 2+ columns are selected
+        # (see _on_selection_changed, wired in load()).
+        self.graph_trigger = QPushButton(self)
+        self.graph_trigger.setFixedSize(34, 34)
+        self.graph_trigger.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.graph_trigger.setToolTip("Graph selected columns")
+        self.graph_trigger.clicked.connect(self._on_make_graph)
+        self.graph_trigger.hide()
+        self.graph_trigger.raise_()
+
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll)
         self._poll_timer.start(POLL_MS)
@@ -438,6 +460,7 @@ class DatasetTableView(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._position_nav_trigger()
+        self._position_graph_trigger()
 
     def _position_nav_trigger(self) -> None:
         margin = 14
@@ -446,11 +469,80 @@ class DatasetTableView(QWidget):
         y = area.bottom() - self.nav_trigger.height() - margin
         self.nav_trigger.move(x, y)
 
+    def _position_graph_trigger(self) -> None:
+        gap = 8
+        x = self.nav_trigger.x() - self.graph_trigger.width() - gap
+        y = self.nav_trigger.y()
+        self.graph_trigger.move(x, y)
+
     def _toggle_nav_popover(self) -> None:
         if self._nav_popover.isVisible():
             self._nav_popover.close()
         else:
             self._nav_popover.show_anchored_to(self.nav_trigger)
+
+    # -- graphing ------------------------------------------------------
+
+    def _on_selection_changed(self, *_args) -> None:
+        # Cheap count check only -- numeric filtering happens at click
+        # time in _on_make_graph, so selecting e.g. one numeric + one
+        # string column still shows the trigger (clicking it is what
+        # reports "not enough numeric columns", not the trigger's
+        # visibility).
+        selection_model = self.table.selectionModel()
+        if selection_model is None:
+            return
+        show = len(selection_model.selectedColumns()) >= 2
+        self.graph_trigger.setVisible(show)
+        if show:
+            self.graph_trigger.raise_()
+            self._position_graph_trigger()
+
+    def _on_make_graph(self) -> None:
+        if self._table_model is None or self._source is None:
+            return
+        layout = self._table_model.layout_info
+        selected = [idx.column() for idx in self.table.selectionModel().selectedColumns()]
+        numeric = [col for col in selected if layout.numeric_mask[col]]
+        if len(numeric) < 2:
+            self.error_message.emit("Select at least 2 numeric columns to graph.")
+            return
+
+        # Deferred, not a top-level import: QtWebEngineWidgets additionally
+        # needs system Chromium runtime libraries (libnss3, libnspr4, ...)
+        # that aren't pip-installable (see requirements.txt) -- importing
+        # this eagerly at module load time meant the whole app failed to
+        # even start on a system missing them, instead of only this one
+        # feature being unavailable.
+        try:
+            from .graph_window import GraphWindow
+        except ImportError as exc:
+            self.error_message.emit(
+                f"Graphing is unavailable: {exc}. See requirements.txt for the "
+                "system packages QtWebEngine needs."
+            )
+            return
+
+        labels = {col: layout.labels[col] for col in numeric}
+        dialog = GraphConfigDialog(self._theme, labels, numeric, parent=self)
+        config = dialog.get_config()
+        if config is None:
+            return
+
+        col_indices = [config.x_column, *config.series.keys()]
+        arrays, truncated = fetch_columns(self._source.dataset, layout, col_indices)
+        title = self._last_context[1] if self._last_context is not None else ""
+        window = GraphWindow(
+            self._theme, labels, config, arrays, truncated, layout.row_count, title=title
+        )
+        self._graph_windows.append(window)
+
+        def _forget(win=window) -> None:
+            if win in self._graph_windows:
+                self._graph_windows.remove(win)
+
+        window.destroyed.connect(_forget)
+        window.show()
 
     # -- public API --------------------------------------------------------
 
@@ -466,6 +558,7 @@ class DatasetTableView(QWidget):
         # QItemSelectionModel is created fresh by setModel() above, so this
         # can only be wired up after it -- see DatasetTableModel.data().
         self._table_model.attach_selection_model(self.table.selectionModel())
+        self.table.selectionModel().selectionChanged.connect(self._on_selection_changed)
         self._apply_column_widths(layout)
 
         self._last_context = (node, path, layout)
@@ -475,6 +568,8 @@ class DatasetTableView(QWidget):
         self.nav_trigger.show()
         self.nav_trigger.raise_()
         self._position_nav_trigger()
+        self.graph_trigger.hide()  # fresh model has no selection yet
+        self._position_graph_trigger()
 
     def clear(self) -> None:
         self._teardown_source()
@@ -483,6 +578,7 @@ class DatasetTableView(QWidget):
         self.stack.setCurrentWidget(self.empty_label)
         self.nav_trigger.hide()
         self._nav_popover.close()
+        self.graph_trigger.hide()
 
     def _emit_context(self) -> None:
         if self._last_context is None:
@@ -494,7 +590,7 @@ class DatasetTableView(QWidget):
             f"{node.dtype}    ·    {layout.row_count:,} rows"
         )
         if layout.truncated:
-            warn_color = "#E0A93B" if self._palette.dark else "#8A5A00"
+            warn_color = c.WARN_COLOR_DARK if self._palette.dark else c.WARN_COLOR_LIGHT
             context += (
                 f'    ·    <span style="color:{warn_color};">Showing first {layout.n_columns} '
                 f"of {layout.total_columns:,} flattened columns</span>"
@@ -574,6 +670,17 @@ class DatasetTableView(QWidget):
         )
         self.nav_trigger.setIcon(icons.icon(icons.NAVIGATE, palette.text, 16))
         self.nav_trigger.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {palette.button_bg};
+                border: 1px solid {palette.grid_line};
+                border-radius: 17px;
+            }}
+            QPushButton:hover {{ background-color: {palette.row_hover}; }}
+            """
+        )
+        self.graph_trigger.setIcon(icons.icon(icons.CHART, palette.text, 16))
+        self.graph_trigger.setStyleSheet(
             f"""
             QPushButton {{
                 background-color: {palette.button_bg};

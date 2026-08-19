@@ -105,3 +105,29 @@ def test_empty_dataset(sample_h5_path):
     with H5Model(sample_h5_path) as model:
         layout = model.column_layout("/empty")
         assert layout.row_count == 0
+
+
+def test_column_layout_numeric_mask_plain():
+    layout = build_column_layout((1000,), np.dtype("int32"))
+    assert layout.numeric_mask == (True,)
+    assert layout.numeric_columns() == [0]
+
+
+def test_column_layout_numeric_mask_2d_all_numeric():
+    layout = build_column_layout((50, 4), np.dtype("float64"))
+    assert layout.numeric_mask == (True, True, True, True)
+    assert layout.numeric_columns() == [0, 1, 2, 3]
+
+
+def test_column_layout_numeric_mask_compound_mixed_dtype():
+    dtype = np.dtype([("x", "f4"), ("y", "f4"), ("label", "S8")])
+    layout = build_column_layout((25,), dtype)
+    assert layout.labels == ["x", "y", "label"]
+    assert layout.numeric_mask == (True, True, False)
+    assert layout.numeric_columns() == [0, 1]
+
+
+def test_column_layout_numeric_mask_excludes_bool():
+    layout = build_column_layout((10,), np.dtype("bool"))
+    assert layout.numeric_mask == (False,)
+    assert layout.numeric_columns() == []

@@ -24,6 +24,7 @@ MAXIMIZE = "maximize"
 RESTORE = "restore"
 CLOSE = "close"
 NAVIGATE = "navigate"
+CHART = "chart"
 
 
 def _draw_group(draw: ImageDraw.ImageDraw, s: float, pad: float, color: str, width: int) -> None:
@@ -78,6 +79,20 @@ def _draw_navigate(draw: ImageDraw.ImageDraw, s: float, pad: float, color: str, 
     draw.ellipse([cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r], fill=color)
 
 
+def _draw_chart(draw: ImageDraw.ImageDraw, s: float, pad: float, color: str, width: int) -> None:
+    # Ascending bar-chart glyph -- used on the trigger button that opens
+    # the graph-configuration dialog for the currently selected columns.
+    base_y = s - pad
+    bar_w = (s - 2 * pad) * 0.22
+    gap = (s - 2 * pad) * 0.12
+    heights = (0.35, 0.62, 0.9)
+    x = pad
+    for h in heights:
+        top_y = base_y - (s - 2 * pad) * h
+        draw.rounded_rectangle([x, top_y, x + bar_w, base_y], radius=bar_w * 0.25, fill=color)
+        x += bar_w + gap
+
+
 _DRAWERS = {
     GROUP: _draw_group,
     DATASET: _draw_dataset,
@@ -86,6 +101,7 @@ _DRAWERS = {
     RESTORE: _draw_restore,
     CLOSE: _draw_close,
     NAVIGATE: _draw_navigate,
+    CHART: _draw_chart,
 }
 
 

@@ -36,7 +36,9 @@ from PySide6.QtWidgets import (
 from .. import icons
 from ..core.h5_model import DATASET, GROUP
 from ..theme import Palette, ThemeManager
+from .frameless import FramelessWindowMixin
 from .group_panel import _ClickableRow
+from .title_bar import BAR_HEIGHT, SimpleTitleBar
 
 H5_SUFFIXES = {".h5", ".hdf5", ".he5"}
 ICON_SIZE = 17
@@ -137,11 +139,12 @@ class _PathEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
-class FileOpenDialog(QDialog):
+class FileOpenDialog(FramelessWindowMixin, QDialog):
     def __init__(self, theme: ThemeManager, start_dir: Optional[str] = None, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowTitle("Open HDF5 File")
-        self.resize(600, 460)
+        self.resize(600, 460 + BAR_HEIGHT)
         self._palette: Palette = theme.palette
         self._selected: Optional[Path] = None
         self._selected_row: Optional[_ClickableRow] = None
@@ -154,8 +157,23 @@ class FileOpenDialog(QDialog):
             self.current_dir = Path.home()
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(18, 18, 18, 16)
-        outer.setSpacing(10)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.title_bar = SimpleTitleBar(
+            theme,
+            "Open HDF5 File",
+            on_minimize=self.showMinimized,
+            on_toggle_maximize=self._toggle_maximize,
+            on_close=self.reject,
+        )
+        outer.addWidget(self.title_bar)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(18, 18, 18, 16)
+        content_layout.setSpacing(10)
+        outer.addWidget(content, 1)
 
         nav = QHBoxLayout()
         up_btn = QPushButton("↑")
@@ -171,7 +189,7 @@ class FileOpenDialog(QDialog):
         home_btn.setFixedWidth(56)
         home_btn.clicked.connect(self._go_home)
         nav.addWidget(home_btn)
-        outer.addLayout(nav)
+        content_layout.addLayout(nav)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -181,10 +199,10 @@ class FileOpenDialog(QDialog):
         self.list_layout.setSpacing(3)
         self.list_layout.addStretch(1)
         self.scroll.setWidget(self.list_body)
-        outer.addWidget(self.scroll, 1)
+        content_layout.addWidget(self.scroll, 1)
 
         self.error_label = QLabel("")
-        outer.addWidget(self.error_label)
+        content_layout.addWidget(self.error_label)
 
         footer = QHBoxLayout()
         self.selection_label = QLabel("No file selected")
@@ -197,7 +215,11 @@ class FileOpenDialog(QDialog):
         self.open_button.setDefault(True)
         self.open_button.clicked.connect(self.accept)
         footer.addWidget(self.open_button)
-        outer.addLayout(footer)
+        content_layout.addLayout(footer)
+
+        for child in (self.title_bar,):
+            child.setCursor(Qt.CursorShape.ArrowCursor)
+        self._init_frameless(BAR_HEIGHT)
 
         self._apply_palette(theme.palette)
         theme.register(self._apply_palette)
@@ -207,6 +229,13 @@ class FileOpenDialog(QDialog):
         if self.exec() == QDialog.DialogCode.Accepted and self._selected is not None:
             return str(self._selected)
         return None
+
+    def closeEvent(self, event) -> None:
+        self._teardown_frameless()
+        super().closeEvent(event)
+
+    def _on_maximize_changed(self, maximized: bool) -> None:
+        self.title_bar.set_maximized(maximized)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -327,7 +356,7 @@ class FileOpenDialog(QDialog):
         self.selection_label.setStyleSheet(f"color: {palette.subtext};")
         self.setStyleSheet(
             f"""
-            QDialog {{ background-color: {palette.window_bg}; color: {palette.text}; }}
+            FileOpenDialog {{ background-color: {palette.window_bg}; color: {palette.text}; }}
             QLineEdit {{
                 background-color: {palette.base_bg};
                 border: 1px solid {palette.grid_line};

@@ -25,7 +25,7 @@ from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QActionGroup, QKeySequence
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenuBar, QMessageBox, QPushButton, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenuBar, QPushButton, QWidget
 
 from .. import icons
 from ..theme import Palette, ThemeManager
@@ -47,6 +47,7 @@ class _BaseTitleBar(QWidget):
         super().__init__(parent)
         self.setFixedHeight(BAR_HEIGHT)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._theme = theme
         self._palette: Palette = theme.palette
         self._maximized = False
         self._on_toggle_maximize = on_toggle_maximize
@@ -203,11 +204,14 @@ class TitleBar(_BaseTitleBar):
         return bar
 
     def _show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            f"About {self._app_title}",
-            f"<b>{self._app_title}</b><br>A modern, cross-platform viewer for HDF5 (.h5) files.",
+        # Deferred import: about_dialog.py imports SimpleTitleBar/BAR_HEIGHT
+        # from this module, so a top-level import here would be circular.
+        from .about_dialog import AboutDialog
+
+        dialog = AboutDialog(
+            self._theme, self._app_title, "A modern, cross-platform viewer for HDF5 (.h5) files.", parent=self
         )
+        dialog.exec()
 
     def _extra_stylesheet(self, palette: Palette) -> str:
         return f"""

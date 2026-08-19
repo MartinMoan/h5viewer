@@ -110,3 +110,37 @@ def test_build_plotly_spec_json_dumps_does_not_raise_with_nan():
     # not valid strict JSON, but json.dumps itself must not raise.
     dumped = json.dumps(spec)
     assert "NaN" in dumped
+
+
+def test_build_plotly_spec_axis_titles_single_series():
+    arrays = {0: np.array([1.0, 2.0]), 1: np.array([3.0, 4.0])}
+    config = GraphConfig(x_column=0, series={1: ChartType.LINE})
+    spec = build_plotly_spec(["time", "temperature"], config, arrays, _palette())
+    assert spec["layout"]["xaxis"]["title"]["text"] == "time"
+    assert spec["layout"]["yaxis"]["title"]["text"] == "temperature"
+
+
+def test_build_plotly_spec_axis_titles_untitled_when_multiple_series():
+    arrays = {0: np.array([1.0, 2.0]), 1: np.array([3.0, 4.0]), 2: np.array([5.0, 6.0])}
+    config = GraphConfig(x_column=0, series={1: ChartType.LINE, 2: ChartType.LINE})
+    spec = build_plotly_spec(["time", "a", "b"], config, arrays, _palette())
+    # X is unambiguous (one column) and still titled; Y has two series
+    # sharing the axis, so it's left untitled -- disambiguated by the
+    # legend/hover tooltip instead of a misleading single label.
+    assert spec["layout"]["xaxis"]["title"]["text"] == "time"
+    assert "title" not in spec["layout"]["yaxis"]
+
+
+def test_build_plotly_spec_histogram_axis_titles():
+    arrays = {0: np.array([1.0, 2.0]), 1: np.array([1.0, 2.0, 3.0])}
+    config = GraphConfig(x_column=0, series={1: ChartType.HISTOGRAM})
+    spec = build_plotly_spec(["x", "counts"], config, arrays, _palette())
+    assert spec["layout"]["xaxis"]["title"]["text"] == "counts"
+    assert spec["layout"]["yaxis"]["title"]["text"] == "Count"
+
+
+def test_build_plotly_spec_always_shows_legend():
+    arrays = {0: np.array([1.0, 2.0]), 1: np.array([3.0, 4.0])}
+    config = GraphConfig(x_column=0, series={1: ChartType.LINE})
+    spec = build_plotly_spec(["x", "y"], config, arrays, _palette())
+    assert spec["layout"]["showlegend"] is True

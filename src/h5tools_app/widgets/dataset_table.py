@@ -367,6 +367,7 @@ class DatasetTableView(QWidget):
         self._source: Optional[DatasetSource] = None
         self._table_model: Optional[DatasetTableModel] = None
         self._last_context: Optional[tuple] = None
+        self._file_path: str = ""
         # Graph windows are independent, non-modal top-level widgets that
         # outlive whatever dataset happens to be loaded here -- kept alive
         # by this list (PySide6 would otherwise garbage-collect a shown
@@ -531,9 +532,16 @@ class DatasetTableView(QWidget):
 
         col_indices = [config.x_column, *config.series.keys()]
         arrays, truncated = fetch_columns(self._source.dataset, layout, col_indices)
-        title = self._last_context[1] if self._last_context is not None else ""
+        dataset_path = self._last_context[1] if self._last_context is not None else ""
         window = GraphWindow(
-            self._theme, labels, config, arrays, truncated, layout.row_count, title=title
+            self._theme,
+            labels,
+            config,
+            arrays,
+            truncated,
+            layout.row_count,
+            title=dataset_path,
+            file_path=self._file_path,
         )
         self._graph_windows.append(window)
 
@@ -562,6 +570,7 @@ class DatasetTableView(QWidget):
         self._apply_column_widths(layout)
 
         self._last_context = (node, path, layout)
+        self._file_path = model.path
         self._emit_context()
 
         self.stack.setCurrentWidget(self.table)

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
@@ -22,6 +23,8 @@ from PySide6.QtWidgets import (
 
 from ..core.plotting import ChartType, GraphConfig
 from ..theme import Palette, ThemeManager
+from .frameless import FramelessWindowMixin
+from .title_bar import BAR_HEIGHT, SimpleTitleBar
 
 _CHART_TYPE_LABELS = {
     ChartType.LINE: "Line",
@@ -31,17 +34,33 @@ _CHART_TYPE_LABELS = {
 }
 
 
-class GraphConfigDialog(QDialog):
+class GraphConfigDialog(FramelessWindowMixin, QDialog):
     def __init__(self, theme: ThemeManager, labels: dict, numeric_col_indices: list, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowTitle("Make Graph")
-        self.resize(480, 420)
+        self.resize(480, 420 + BAR_HEIGHT)
         self._palette: Palette = theme.palette
         self._labels = labels
         self._col_indices = list(numeric_col_indices)
         self._series_combos: dict = {}
 
         outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.title_bar = SimpleTitleBar(
+            theme,
+            "Make Graph",
+            on_minimize=self.showMinimized,
+            on_toggle_maximize=self._toggle_maximize,
+            on_close=self.reject,
+        )
+        outer.addWidget(self.title_bar)
+
+        content = QWidget()
+        outer.addWidget(content, 1)
+        outer = QVBoxLayout(content)
         outer.setContentsMargins(18, 18, 18, 16)
         outer.setSpacing(10)
 
@@ -83,6 +102,9 @@ class GraphConfigDialog(QDialog):
         footer.addWidget(self.plot_button)
         outer.addLayout(footer)
 
+        self.title_bar.setCursor(Qt.CursorShape.ArrowCursor)
+        self._init_frameless(BAR_HEIGHT)
+
         self._rebuild_series_rows()
         self._apply_palette(theme.palette)
         theme.register(self._apply_palette)
@@ -92,6 +114,13 @@ class GraphConfigDialog(QDialog):
             series = {col: ChartType(combo.currentData()) for col, combo in self._series_combos.items()}
             return GraphConfig(x_column=self._current_x_column(), series=series)
         return None
+
+    def closeEvent(self, event) -> None:
+        self._teardown_frameless()
+        super().closeEvent(event)
+
+    def _on_maximize_changed(self, maximized: bool) -> None:
+        self.title_bar.set_maximized(maximized)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -141,7 +170,7 @@ class GraphConfigDialog(QDialog):
         self._palette = palette
         self.setStyleSheet(
             f"""
-            QDialog {{ background-color: {palette.window_bg}; color: {palette.text}; }}
+            GraphConfigDialog {{ background-color: {palette.window_bg}; color: {palette.text}; }}
             QLabel {{ color: {palette.text}; }}
             QRadioButton {{ color: {palette.text}; padding: 2px; }}
             QComboBox {{

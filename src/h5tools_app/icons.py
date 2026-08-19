@@ -23,6 +23,7 @@ MINIMIZE = "minimize"
 MAXIMIZE = "maximize"
 RESTORE = "restore"
 CLOSE = "close"
+NAVIGATE = "navigate"
 
 
 def _draw_group(draw: ImageDraw.ImageDraw, s: float, pad: float, color: str, width: int) -> None:
@@ -62,6 +63,21 @@ def _draw_close(draw: ImageDraw.ImageDraw, s: float, pad: float, color: str, wid
     draw.line([(pad, s - pad), (s - pad, pad)], fill=color, width=width)
 
 
+def _draw_navigate(draw: ImageDraw.ImageDraw, s: float, pad: float, color: str, width: int) -> None:
+    # A simple crosshair/target -- used on the trigger button that opens
+    # the row-navigation popover (Top / End / jump-to-row).
+    cx = cy = s / 2
+    r = (s - 2 * pad) / 2
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=width)
+    tick = r * 0.55
+    draw.line([(cx, pad), (cx, pad + tick)], fill=color, width=width)
+    draw.line([(cx, s - pad - tick), (cx, s - pad)], fill=color, width=width)
+    draw.line([(pad, cy), (pad + tick, cy)], fill=color, width=width)
+    draw.line([(s - pad - tick, cy), (s - pad, cy)], fill=color, width=width)
+    dot_r = width * 0.9
+    draw.ellipse([cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r], fill=color)
+
+
 _DRAWERS = {
     GROUP: _draw_group,
     DATASET: _draw_dataset,
@@ -69,6 +85,7 @@ _DRAWERS = {
     MAXIMIZE: _draw_maximize,
     RESTORE: _draw_restore,
     CLOSE: _draw_close,
+    NAVIGATE: _draw_navigate,
 }
 
 

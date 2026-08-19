@@ -15,16 +15,16 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
-    QSizePolicy,
     QStackedWidget,
     QTableView,
     QVBoxLayout,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import constants as c
+from .. import icons
 from ..core.dataset_source import DatasetSource
 from ..core.h5_model import ColumnLayout, H5Model
 from ..theme import Palette, ThemeManager
@@ -130,64 +131,152 @@ class DatasetTableModel(QAbstractTableModel):
         self._placeholder_color = QColor(palette.subtext)
 
 
+class _DatasetTable(QTableView):
+    """Plain QTableView, except Shift+wheel scrolls horizontally instead of
+    vertically -- the usual convention, and particularly useful here since
+    a wide dataset can have far more columns than fit on screen at once."""
+
+    def wheelEvent(self, event) -> None:
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            # Some platforms already convert Shift+wheel to a horizontal
+            # delta (angleDelta().x()) before Qt sees it; where they don't,
+            # fall back to treating the vertical delta as horizontal
+            # ourselves.
+            delta = event.angleDelta().x() or event.angleDelta().y()
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() - delta)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+
+class _NavPopover(QFrame):
+    """Small floating panel holding the Top/End/jump-to-row controls,
+    opened from a corner trigger button rather than living permanently in
+    the toolbar -- keeps the dataset view down to just the table most of
+    the time. A ``Qt.WindowType.Popup`` window, the same mechanism a combo
+    box dropdown uses: it isn't a real (blocking) modal dialog, it just
+    closes itself the moment you click anywhere outside it."""
+
+    def __init__(self, theme: ThemeManager, owner: DatasetTableView):
+        super().__init__(owner, Qt.WindowType.Popup)
+        self._owner = owner
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        self.top_button = QPushButton("Top")
+        self.top_button.clicked.connect(self._go_home)
+        self.end_button = QPushButton("End")
+        self.end_button.clicked.connect(self._go_end)
+        layout.addWidget(self.top_button)
+        layout.addWidget(self.end_button)
+        layout.addSpacing(4)
+
+        layout.addWidget(QLabel("Row"))
+        self.goto_entry = QLineEdit()
+        self.goto_entry.setFixedWidth(80)
+        self.goto_entry.setPlaceholderText("#")
+        self.goto_entry.returnPressed.connect(self._go_to)
+        layout.addWidget(self.goto_entry)
+        self.go_button = QPushButton("Go")
+        self.go_button.clicked.connect(self._go_to)
+        layout.addWidget(self.go_button)
+
+        theme.register(self._apply_palette)
+
+    def show_anchored_to(self, trigger: QWidget) -> None:
+        self.goto_entry.clear()
+        self.adjustSize()
+        # Bottom-right corner of the popover lands exactly on the
+        # trigger's own bottom-right corner, so it opens up-and-left from
+        # the corner button rather than covering it or drifting away from
+        # it, the way a tooltip anchors to whatever it's attached to.
+        anchor = trigger.mapToGlobal(trigger.rect().bottomRight())
+        self.move(anchor.x() - self.width(), anchor.y() - self.height())
+        self.show()
+        self.goto_entry.setFocus()
+
+    def _go_home(self) -> None:
+        self._owner._go_home()
+        self.close()
+
+    def _go_end(self) -> None:
+        self._owner._go_end()
+        self.close()
+
+    def _go_to(self) -> None:
+        self._owner._on_goto(self.goto_entry.text())
+        self.close()
+
+    def _apply_palette(self, palette: Palette) -> None:
+        self.setStyleSheet(
+            f"""
+            _NavPopover {{
+                background-color: {palette.base_bg};
+                border: 1px solid {palette.grid_line};
+                border-radius: 8px;
+            }}
+            QLabel {{ color: {palette.subtext}; }}
+            QPushButton {{
+                background-color: {palette.button_bg};
+                color: {palette.text};
+                border: none;
+                border-radius: 4px;
+                padding: 4px 10px;
+            }}
+            QPushButton:hover {{ background-color: {palette.row_hover}; }}
+            QLineEdit {{
+                background-color: {palette.base_bg};
+                color: {palette.text};
+                border: 1px solid {palette.grid_line};
+                border-radius: 4px;
+                padding: 2px 6px;
+            }}
+            """
+        )
+
+
 class DatasetTableView(QWidget):
+    # Emits the "name · path · shape · dtype · N rows" summary line
+    # (plus an HTML-colored truncation notice when applicable) every time
+    # a dataset is loaded, and "" on clear() -- consumed by App to show it
+    # in the status bar rather than reserving a title row of its own
+    # space above the table. See load()/clear() below; this replaces what
+    # used to be a title_label/subtitle_label/warning_label row here.
+    context_changed = Signal(str)
+
     def __init__(self, theme: ThemeManager, parent=None):
         super().__init__(parent)
         self._theme = theme
         self._palette: Palette = theme.palette
         self._source: Optional[DatasetSource] = None
         self._table_model: Optional[DatasetTableModel] = None
+        self._last_context: Optional[tuple] = None
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 14, 16, 16)
-        outer.setSpacing(6)
+        # Top margin matches HierarchyTree's own top layout margin (see
+        # hierarchy_tree.py) so the table's content -- its column header
+        # row -- lines up flush with the sidebar's top row, the same way
+        # the two panes already share a left/right/bottom rhythm. This
+        # pane used to reserve its own title/subtitle row above the table
+        # (and, before that, a row of Top/End/Row/Go controls); both have
+        # since moved out -- the controls to the corner popover, the
+        # title/subtitle to the status bar (see context_changed above) --
+        # so nothing but the table itself needs to live in this layout.
+        outer.setContentsMargins(16, 10, 16, 16)
+        outer.setSpacing(0)
 
-        bar = QHBoxLayout()
-        title_col = QVBoxLayout()
-        title_col.setSpacing(0)
-        self.title_label = QLabel("")
-        self.title_label.setStyleSheet("font-weight: 600; font-size: 15pt;")
-        self.subtitle_label = QLabel("")
-        # The subtitle is one long non-wrapping line ("path · shape ·
-        # dtype · N rows") -- without this, a plain QLabel's minimum size
-        # hint is however wide its full text needs to be, which forces
-        # this whole pane (and therefore the splitter) to never shrink
-        # narrower than that, however long the path happens to be. With
-        # Ignored, the label can be visually compressed instead of
-        # forcing its container to stay wide.
-        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.subtitle_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        title_col.addWidget(self.title_label)
-        title_col.addWidget(self.subtitle_label)
-        bar.addLayout(title_col)
-        bar.addStretch(1)
-
-        self.top_button = QPushButton("Top")
-        self.top_button.clicked.connect(self._go_home)
-        self.end_button = QPushButton("End")
-        self.end_button.clicked.connect(self._go_end)
-        bar.addWidget(self.top_button)
-        bar.addWidget(self.end_button)
-        bar.addSpacing(8)
-
-        bar.addWidget(QLabel("Row"))
-        self.goto_entry = QLineEdit()
-        self.goto_entry.setFixedWidth(80)
-        self.goto_entry.setPlaceholderText("#")
-        self.goto_entry.returnPressed.connect(self._on_goto)
-        bar.addWidget(self.goto_entry)
-        self.go_button = QPushButton("Go")
-        self.go_button.clicked.connect(self._on_goto)
-        bar.addWidget(self.go_button)
-
-        outer.addLayout(bar)
-
-        self.warning_label = QLabel("")
-        self.warning_label.setVisible(False)
-        outer.addWidget(self.warning_label)
-
-        self.table = QTableView()
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.table = _DatasetTable()
+        # ExtendedSelection + the default SelectItems behavior: a normal
+        # click selects a single cell (shift/ctrl-click extend, as usual),
+        # but clicking a horizontal header section is a distinct built-in
+        # QTableView feature that selects the whole column regardless of
+        # selectionBehavior -- Excel-like column selection falls out of
+        # this for free, no extra wiring needed.
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -198,6 +287,10 @@ class DatasetTableView(QWidget):
         hheader = self.table.horizontalHeader()
         hheader.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hheader.setDefaultSectionSize(c.MIN_COL_WIDTH)
+        # Purely visual reordering (Qt remaps visual <-> logical column
+        # index internally) -- doesn't touch the model or the underlying
+        # file, just the on-screen column order.
+        hheader.setSectionsMovable(True)
 
         self.empty_label = QLabel("Select a dataset from the tree to view its contents")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -207,11 +300,40 @@ class DatasetTableView(QWidget):
         self.stack.addWidget(self.table)
         outer.addWidget(self.stack, 1)
 
+        # Floating corner trigger for the Top/End/jump-to-row controls,
+        # not part of any layout -- it's a raw child of this widget,
+        # explicitly positioned/raised so it floats above the table
+        # instead of taking up its own row of toolbar space.
+        self.nav_trigger = QPushButton(self)
+        self.nav_trigger.setFixedSize(34, 34)
+        self.nav_trigger.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.nav_trigger.clicked.connect(self._toggle_nav_popover)
+        self.nav_trigger.hide()  # only relevant once a dataset is loaded
+        self.nav_trigger.raise_()
+        self._nav_popover = _NavPopover(theme, self)
+
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll)
         self._poll_timer.start(POLL_MS)
 
         theme.register(self._apply_palette)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._position_nav_trigger()
+
+    def _position_nav_trigger(self) -> None:
+        margin = 14
+        area = self.stack.geometry()  # already in this widget's own coordinates
+        x = area.right() - self.nav_trigger.width() - margin
+        y = area.bottom() - self.nav_trigger.height() - margin
+        self.nav_trigger.move(x, y)
+
+    def _toggle_nav_popover(self) -> None:
+        if self._nav_popover.isVisible():
+            self._nav_popover.close()
+        else:
+            self._nav_popover.show_anchored_to(self.nav_trigger)
 
     # -- public API --------------------------------------------------------
 
@@ -226,28 +348,38 @@ class DatasetTableView(QWidget):
         self.table.setModel(self._table_model)
         self._apply_column_widths(layout)
 
-        self.title_label.setText(node.name)
-        shape_txt = "scalar" if node.shape == () else "×".join(str(d) for d in node.shape)
-        self.subtitle_label.setText(
-            f"{path}    ·    shape {shape_txt}    ·    {node.dtype}    ·    {layout.row_count:,} rows"
-        )
-        if layout.truncated:
-            self.warning_label.setText(
-                f"Showing first {layout.n_columns} of {layout.total_columns:,} flattened columns"
-            )
-            self.warning_label.setVisible(True)
-        else:
-            self.warning_label.setVisible(False)
+        self._last_context = (node, path, layout)
+        self._emit_context()
 
-        self.goto_entry.clear()
         self.stack.setCurrentWidget(self.table)
+        self.nav_trigger.show()
+        self.nav_trigger.raise_()
+        self._position_nav_trigger()
 
     def clear(self) -> None:
         self._teardown_source()
-        self.title_label.setText("")
-        self.subtitle_label.setText("")
-        self.warning_label.setVisible(False)
+        self._last_context = None
+        self.context_changed.emit("")
         self.stack.setCurrentWidget(self.empty_label)
+        self.nav_trigger.hide()
+        self._nav_popover.close()
+
+    def _emit_context(self) -> None:
+        if self._last_context is None:
+            return
+        node, path, layout = self._last_context
+        shape_txt = "scalar" if node.shape == () else "×".join(str(d) for d in node.shape)
+        context = (
+            f"{node.name}    ·    {path}    ·    shape {shape_txt}    ·    "
+            f"{node.dtype}    ·    {layout.row_count:,} rows"
+        )
+        if layout.truncated:
+            warn_color = "#E0A93B" if self._palette.dark else "#8A5A00"
+            context += (
+                f'    ·    <span style="color:{warn_color};">Showing first {layout.n_columns} '
+                f"of {layout.total_columns:,} flattened columns</span>"
+            )
+        self.context_changed.emit(context)
 
     def _teardown_source(self) -> None:
         self.table.setModel(None)
@@ -272,10 +404,10 @@ class DatasetTableView(QWidget):
         if self._table_model is not None:
             self.table.verticalScrollBar().setValue(self.table.verticalScrollBar().maximum())
 
-    def _on_goto(self) -> None:
+    def _on_goto(self, text: str) -> None:
         if self._table_model is None:
             return
-        text = self.goto_entry.text().strip()
+        text = text.strip()
         if not text.isdigit():
             return
         row = max(0, min(int(text), self._table_model.rowCount() - 1))
@@ -291,10 +423,8 @@ class DatasetTableView(QWidget):
         self._palette = palette
         if self._table_model is not None:
             self._table_model.apply_palette(palette)
+        self._emit_context()  # re-embeds the truncation-warning color for the new palette
 
-        self.subtitle_label.setStyleSheet(f"color: {palette.subtext}; font-size: 10pt;")
-        warn_color = "#E0A93B" if palette.dark else "#8A5A00"
-        self.warning_label.setStyleSheet(f"color: {warn_color}; font-size: 10pt;")
         self.empty_label.setStyleSheet(f"color: {palette.subtext}; font-size: 12pt;")
         self.table.setStyleSheet(
             f"""
@@ -302,7 +432,7 @@ class DatasetTableView(QWidget):
                 background-color: {palette.body_bg};
                 gridline-color: {palette.grid_line};
                 border: none;
-                selection-background-color: transparent;
+                selection-background-color: {palette.selection};
                 selection-color: {palette.text};
             }}
             QHeaderView::section {{
@@ -312,5 +442,16 @@ class DatasetTableView(QWidget):
                 border-bottom: 2px solid {palette.accent};
                 padding: 4px 8px;
             }}
+            """
+        )
+        self.nav_trigger.setIcon(icons.icon(icons.NAVIGATE, palette.text, 16))
+        self.nav_trigger.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {palette.button_bg};
+                border: 1px solid {palette.grid_line};
+                border-radius: 17px;
+            }}
+            QPushButton:hover {{ background-color: {palette.row_hover}; }}
             """
         )

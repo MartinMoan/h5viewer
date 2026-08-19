@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QRect, Qt
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -49,7 +50,7 @@ from .widgets.file_open_dialog import FileOpenDialog
 from .widgets.group_panel import GroupPanel
 from .widgets.hierarchy_tree import HierarchyTree
 from .widgets.status_bar import StatusBar
-from .widgets.title_bar import TitleBar
+from .widgets.title_bar import BAR_HEIGHT, TitleBar
 
 _DEFAULT_W, _DEFAULT_H = 1240, 780
 _MIN_W, _MIN_H = 860, 560
@@ -69,12 +70,16 @@ class App(QWidget):
         self.model: Optional[H5Model] = None
         self._maximized = False
         self._restore_geometry: Optional[QRect] = None
+        self._override_cursor_active = False
         self.theme = ThemeManager(QApplication.instance())
         self.theme.set_mode("dark")
 
         self._outer_layout = QVBoxLayout(self)
         outer = self._outer_layout
-        outer.setContentsMargins(_RESIZE_MARGIN, _RESIZE_MARGIN, _RESIZE_MARGIN, _RESIZE_MARGIN)
+        # Flush with the window edges (VS Code-style) -- no reserved
+        # border. See the module docstring for how edge-resize works
+        # without one.
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         # Qt's default top-level-layout behavior propagates this layout's
         # computed size hints up to the *window's* own min/max size
@@ -101,6 +106,7 @@ class App(QWidget):
 
         self.status_bar = StatusBar(self.theme)
         outer.addWidget(self.status_bar)
+        self.table_view.context_changed.connect(self.status_bar.set_context)
 
         # A resize cursor set on this widget (see mouseMoveEvent below,
         # only meant for the few pixels of bare margin around the window
@@ -113,6 +119,18 @@ class App(QWidget):
         # regardless of what App.cursor() currently is.
         for child in (self.title_bar, self.splitter, self.status_bar):
             child.setCursor(Qt.CursorShape.ArrowCursor)
+
+        # With zero margins, every pixel of the window is covered by some
+        # child widget -- there's no bare App surface left for a plain
+        # mouseMoveEvent override to see hover motion on. Qt only
+        # dispatches MouseMove without a button held to widgets that opt
+        # in, so every descendant needs tracking on for the QApplication-
+        # wide event filter (below) to observe hover position anywhere in
+        # the window, regardless of which child is actually under the
+        # cursor.
+        for w in self.findChildren(QWidget):
+            w.setMouseTracking(True)
+        QApplication.instance().installEventFilter(self)
 
         self._center_on_screen()
         self.theme.register(self._apply_palette)
@@ -176,7 +194,6 @@ class App(QWidget):
 
         self.model = new_model
         self.tree.load_file(self.model)
-        self.title_bar.set_document_title(Path(self.model.path).name)
         self.status_bar.set_path(self.model.path)
         self.status_bar.set_message("File loaded")
         # So the user can start navigating the hierarchy with arrow keys
@@ -194,6 +211,12 @@ class App(QWidget):
                 return
             self.right_stack.setCurrentWidget(self.table_view)
         else:
+            # Not table_view.clear() -- that would tear down its loaded
+            # DatasetSource for no reason just because the user is
+            # momentarily looking at a different node; only the status-bar
+            # context line (which described the dataset table, now hidden)
+            # needs to go quiet.
+            self.status_bar.set_context("")
             self.group_panel.show_node(self.model, node)
             self.right_stack.setCurrentWidget(self.group_panel)
 
@@ -201,6 +224,7 @@ class App(QWidget):
         self.tree.select_path(path)
 
     def closeEvent(self, event) -> None:
+        QApplication.instance().removeEventFilter(self)
         self.table_view.clear()
         if self.model is not None:
             self.model.close()
@@ -217,22 +241,31 @@ class App(QWidget):
         if self._maximized:
             if self._restore_geometry is not None:
                 self.setGeometry(self._restore_geometry)
-            self._outer_layout.setContentsMargins(
-                _RESIZE_MARGIN, _RESIZE_MARGIN, _RESIZE_MARGIN, _RESIZE_MARGIN
-            )
             self._maximized = False
         else:
             screen = self.screen() or QApplication.primaryScreen()
             self._restore_geometry = self.geometry()
-            self._outer_layout.setContentsMargins(0, 0, 0, 0)
             self.setGeometry(screen.availableGeometry())
             self._maximized = True
         self.title_bar.set_maximized(self._maximized)
 
     # -- window chrome: edge resize --------------------------------------
+    #
+    # There's no reserved margin any more (see __init__), so no bare
+    # App-widget surface exists for a plain mousePressEvent/mouseMoveEvent
+    # override to catch resize drags on -- every pixel belongs to some
+    # child widget. Instead a QApplication-wide event filter (installed in
+    # __init__, see eventFilter below) inspects every mouse press/move in
+    # the whole app and checks the *global* cursor position against this
+    # window's edges, regardless of which child widget the event actually
+    # landed on. The title bar row is excluded entirely: it already
+    # handles drag-to-move and its own clicks, and with zero margin its
+    # top few px overlap those controls, so treating that row as resize
+    # territory too would make clicking near the top of a button
+    # sometimes start a resize instead.
 
     def _edges_at(self, x: int, y: int) -> Qt.Edges:
-        m = _RESIZE_MARGIN
+        m = _RESIZE_ZONE
         edges = Qt.Edges()
         if x <= m:
             edges |= Qt.Edge.LeftEdge
@@ -265,47 +298,64 @@ class App(QWidget):
             return Qt.CursorShape.SizeVerCursor
         return None
 
-    def mouseMoveEvent(self, event) -> None:
-        if not self._maximized:
-            pos = event.position().toPoint()
-            edges = self._edges_at(pos.x(), pos.y())
-            cursor = self._cursor_for_edges(edges)
-            if cursor is not None:
-                self.setCursor(cursor)
+    def _edges_for_global_pos(self, global_pos) -> Qt.Edges:
+        if self._maximized:
+            return Qt.Edges()
+        pos = self.mapFromGlobal(global_pos)
+        if not self.rect().contains(pos) or pos.y() < BAR_HEIGHT:
+            return Qt.Edges()
+        return self._edges_at(pos.x(), pos.y())
+
+    def _set_resize_cursor(self, cursor: Optional[Qt.CursorShape]) -> None:
+        # QApplication.override cursor rather than setCursor() on whatever
+        # widget happens to be under the pointer: the widget under the
+        # pointer changes constantly as the mouse crosses child boundaries
+        # near an edge, and there's no single owner to reliably reset
+        # afterwards the way there was when App had its own bare margin.
+        if cursor is not None:
+            if self._override_cursor_active:
+                QApplication.changeOverrideCursor(QCursor(cursor))
             else:
-                self.unsetCursor()
-        super().mouseMoveEvent(event)
+                QApplication.setOverrideCursor(QCursor(cursor))
+                self._override_cursor_active = True
+        elif self._override_cursor_active:
+            QApplication.restoreOverrideCursor()
+            self._override_cursor_active = False
 
-    def leaveEvent(self, event) -> None:
-        # Without this, a resize cursor set while hovering the edge margin
-        # sticks around after the pointer moves onto a child widget (the
-        # title bar, the splitter, ...) that never fires our mouseMoveEvent
-        # to reset it -- children with no cursor of their own inherit
-        # whatever we last set here.
-        self.unsetCursor()
-        super().leaveEvent(event)
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and not self._maximized:
-            pos = event.position().toPoint()
-            edges = self._edges_at(pos.x(), pos.y())
+    def eventFilter(self, obj, event) -> bool:
+        etype = event.type()
+        if etype == QEvent.Type.MouseMove and isinstance(obj, QWidget) and obj.window() is self:
+            edges = self._edges_for_global_pos(event.globalPosition().toPoint())
+            self._set_resize_cursor(self._cursor_for_edges(edges))
+        elif (
+            etype == QEvent.Type.MouseButtonPress
+            and isinstance(obj, QWidget)
+            and obj.window() is self
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            edges = self._edges_for_global_pos(event.globalPosition().toPoint())
             if edges:
                 handle = self.windowHandle()
                 if handle is not None:
                     handle.startSystemResize(edges)
-                    return
-        super().mousePressEvent(event)
+                    return True
+        return super().eventFilter(obj, event)
+
+    def leaveEvent(self, event) -> None:
+        # Fires when the pointer leaves the window's total bounds (not
+        # when it moves between children within it), which is the right
+        # moment to make sure a resize cursor doesn't get stuck on.
+        self._set_resize_cursor(None)
+        super().leaveEvent(event)
 
     # -- theming ---------------------------------------------------------
 
     def _apply_palette(self, palette: Palette) -> None:
-        # header_bg, not window_bg: this color shows through the thin
-        # resize-margin ring left around the whole window (see
-        # _RESIZE_MARGIN), and window_bg is noticeably darker than the
-        # title bar sitting right inside it -- that mismatch is what reads
-        # as a visible border wrapping the window, right up to enclosing
-        # the min/max/close buttons. Matching the title/status bar color
-        # instead makes the margin blend in rather than look like a frame.
+        # header_bg, not window_bg: there's no reserved margin any more
+        # for this to show through, but it's still App's own background
+        # underneath every child widget, so keeping it matched to the
+        # title/status bar avoids even a one-frame flash of a mismatched
+        # color during resize/relayout.
         self.setStyleSheet(
             f"""
             App {{ background-color: {palette.header_bg}; }}
@@ -315,6 +365,42 @@ class App(QWidget):
             }}
             QSplitter::handle:hover {{
                 background-color: {palette.accent};
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 6px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {palette.accent};
+                min-height: 24px;
+                border-radius: 3px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+                border: none;
+                background: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+            QScrollBar:horizontal {{
+                background: transparent;
+                height: 6px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background-color: {palette.accent};
+                min-width: 24px;
+                border-radius: 3px;
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                width: 0px;
+                border: none;
+                background: none;
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: transparent;
             }}
             """
         )

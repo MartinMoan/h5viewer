@@ -43,9 +43,15 @@ class HierarchyTree(QWidget):
         self._model_ref: Optional[H5Model] = None
         self._items: dict[str, QStandardItem] = {}
         self._palette: Palette = theme.palette
+        # Otherwise transparent, so the top/left layout margin below would
+        # expose App's own (darker) background rather than the tree's own
+        # panel color -- reading as the whole pane having shifted position
+        # rather than just the tree content getting a bit of breathing
+        # room within it.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 0, 4)
+        layout.setContentsMargins(4, 10, 0, 4)
 
         self.model = QStandardItemModel()
 
@@ -213,6 +219,7 @@ class HierarchyTree(QWidget):
 
     def _apply_palette(self, palette: Palette) -> None:
         self._palette = palette
+        self.setStyleSheet(f"HierarchyTree {{ background-color: {palette.base_bg}; }}")
         self.tree.setStyleSheet(f"""
             QTreeView {{
                 background-color: {palette.base_bg};

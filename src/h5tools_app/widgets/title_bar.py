@@ -90,9 +90,6 @@ class TitleBar(QWidget):
         kind = icons.RESTORE if maximized else icons.MAXIMIZE
         self.max_button.setIcon(icons.icon(kind, self._palette.text, ICON_SIZE))
 
-    def set_document_title(self, name: str | None) -> None:
-        self.title_label.setText(f"{name} — {self._app_title}" if name else self._app_title)
-
     # -- menu bar ----------------------------------------------------------
 
     def _build_menu_bar(self, on_open_file, on_set_appearance, on_close) -> QMenuBar:

@@ -38,9 +38,19 @@ class _ClickableRow(QFrame):
 
 
 class GroupPanel(QWidget):
-    def __init__(self, theme: ThemeManager, on_child_activate: Callable[[str], None], parent=None):
+    def __init__(
+        self,
+        theme: ThemeManager,
+        on_child_activate: Callable[[str], None],
+        on_child_double_activate: Optional[Callable[[str], None]] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._on_child_activate = on_child_activate
+        # Same single-click/double-click distinction HierarchyTree makes
+        # (see its on_select/on_activate) -- optional so this panel still
+        # works standalone without it.
+        self._on_child_double_activate = on_child_double_activate
         self._palette: Palette = theme.palette
         self._last: Optional[tuple[H5Model, NodeInfo]] = None
 
@@ -149,6 +159,8 @@ class GroupPanel(QWidget):
         row_layout.addWidget(info_label)
 
         row.clicked.connect(lambda p=child.path: self._on_child_activate(p))
+        if self._on_child_double_activate is not None:
+            row.doubleClicked.connect(lambda p=child.path: self._on_child_double_activate(p))
         self.body_layout.insertWidget(index, row)
         return index + 1
 

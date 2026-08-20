@@ -1,6 +1,7 @@
 """Modal dialog for configuring a graph from the dataset table's currently
 selected (numeric) columns: pick one column as the X axis, and a chart
-type for every other column.
+type -- plus, for non-Histogram series, which Y axis to plot against --
+for every other column.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..core.plotting import ChartType, GraphConfig
+from ..core.plotting import ChartType, GraphConfig, SeriesSpec
 from ..theme import Palette, ThemeManager
 from .frameless import FramelessWindowMixin
 from .title_bar import BAR_HEIGHT, SimpleTitleBar
@@ -111,7 +112,10 @@ class GraphConfigDialog(FramelessWindowMixin, QDialog):
 
     def get_config(self) -> Optional[GraphConfig]:
         if self.exec() == QDialog.DialogCode.Accepted:
-            series = {col: ChartType(combo.currentData()) for col, combo in self._series_combos.items()}
+            series = {
+                col: SeriesSpec(chart_type=ChartType(type_combo.currentData()), axis=axis_combo.currentData())
+                for col, (type_combo, axis_combo) in self._series_combos.items()
+            }
             return GraphConfig(x_column=self._current_x_column(), series=series)
         return None
 
@@ -156,12 +160,29 @@ class GraphConfigDialog(FramelessWindowMixin, QDialog):
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(4, 2, 4, 2)
             row_layout.addWidget(QLabel(self._labels[col]), 1)
-            combo = QComboBox()
+            type_combo = QComboBox()
             for chart_type, text in _CHART_TYPE_LABELS.items():
-                combo.addItem(text, chart_type.value)
-            row_layout.addWidget(combo)
+                type_combo.addItem(text, chart_type.value)
+            row_layout.addWidget(type_combo)
+            # Which Y axis this series plots against -- lets e.g.
+            # temperature and pressure share an X column without one
+            # flattening into a barely-visible line next to the other's
+            # scale (see core/plotting.py's SeriesSpec/build_plotly_spec).
+            # Meaningless for a Histogram series (it always gets its own
+            # separate Count subplot), so disabled rather than removed --
+            # switching chart type back re-enables it with its choice
+            # intact, instead of resetting to "Left" every time.
+            axis_combo = QComboBox()
+            axis_combo.addItem("Left axis", "left")
+            axis_combo.addItem("Right axis", "right")
+            row_layout.addWidget(axis_combo)
+            type_combo.currentIndexChanged.connect(
+                lambda _idx, tc=type_combo, ac=axis_combo: ac.setEnabled(
+                    ChartType(tc.currentData()) != ChartType.HISTOGRAM
+                )
+            )
             self._series_layout.insertWidget(i, row)
-            self._series_combos[col] = combo
+            self._series_combos[col] = (type_combo, axis_combo)
             i += 1
 
     # -- theming -------------------------------------------------------

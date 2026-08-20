@@ -104,7 +104,8 @@ _SKELETON_HTML = f"""
     var gd = document.getElementById('chart');
     Plotly.relayout(gd, {{
       'xaxis.autorange': true, 'yaxis.autorange': true,
-      'xaxis2.autorange': true, 'yaxis2.autorange': true
+      'xaxis2.autorange': true, 'yaxis2.autorange': true,
+      'yaxis3.autorange': true
     }});
   }}
   function togglePan() {{

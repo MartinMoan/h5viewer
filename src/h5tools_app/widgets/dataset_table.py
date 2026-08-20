@@ -25,7 +25,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -52,6 +52,14 @@ from ..theme import Palette, ThemeManager
 from .graph_config_dialog import GraphConfigDialog
 
 POLL_MS = 40
+
+# Ceiling for the double-click-to-fit column width -- deliberately much
+# more generous than c.MAX_COL_WIDTH (which only bounds the crude,
+# label-length-only initial guess in _apply_column_widths): fitting to
+# content is an explicit, one-off user action, so a genuinely wide value
+# should actually be shown in full rather than clipped back down to the
+# same small default other columns start at.
+_AUTOFIT_MAX_WIDTH = 640
 
 
 def _selected_shade(hex_color: str, dark: bool) -> QColor:
@@ -215,13 +223,18 @@ class _DatasetTable(QTableView):
         super().wheelEvent(event)
 
 
-class _ColumnToggleFilter(QObject):
+class _HeaderInteractionFilter(QObject):
     """Installed on the horizontal header's viewport (not the header
     itself -- see below) to deselect a column on a second plain click,
     instead of the built-in header-click behavior (wired up automatically
     by QTableView, see the ExtendedSelection note above), which just
     re-selects the same already-selected column -- a click has no way to
-    express "actually, never mind" there.
+    express "actually, never mind" there. Also auto-fits a column to its
+    content when the border between two header sections is double-clicked
+    -- the familiar spreadsheet gesture, which QHeaderView doesn't provide
+    on its own for content that isn't sized purely from a delegate's size
+    hint (this table's cell text comes from a lazily-loaded
+    ``DatasetSource``, not a delegate).
 
     Swapping in a QHeaderView subclass via setHorizontalHeader() was tried
     first and rejected: QTableView only wires up its internal
@@ -237,11 +250,19 @@ class _ColumnToggleFilter(QObject):
     working exactly as before.
     """
 
-    def __init__(self, view: QTableView, parent=None):
+    def __init__(self, view: QTableView, on_autofit, parent=None):
         super().__init__(parent)
         self._view = view
+        self._on_autofit = on_autofit
 
     def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+            header = self._view.horizontalHeader()
+            section = self._boundary_section(header, event.position().x())
+            if section is not None:
+                self._on_autofit(section)
+                return True
+            return False
         if (
             event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
@@ -256,6 +277,24 @@ class _ColumnToggleFilter(QObject):
                     selection_model.clearSelection()
                     return True
         return False
+
+    @staticmethod
+    def _boundary_section(header: QHeaderView, x: float) -> Optional[int]:
+        """Returns the (logical) section whose right-hand border is under
+        ``x``, or ``None`` if ``x`` isn't near a section boundary. Sampling
+        just past each side of ``x`` and comparing the section reported at
+        each point -- rather than computing a single section's edges
+        directly -- keeps this correct under column reordering (sections
+        are movable, see hheader.setSectionsMovable below), since
+        logicalIndexAt already resolves visual position to logical index
+        for us either way.
+        """
+        margin = 4
+        left = header.logicalIndexAt(int(x) - margin)
+        right = header.logicalIndexAt(int(x) + margin)
+        if left >= 0 and right >= 0 and left != right:
+            return left
+        return None
 
 
 class _NavPopover(QFrame):
@@ -409,11 +448,13 @@ class DatasetTableView(QWidget):
         # index internally) -- doesn't touch the model or the underlying
         # file, just the on-screen column order.
         hheader.setSectionsMovable(True)
-        # A second plain click on an already-selected column deselects it
-        # -- see _ColumnToggleFilter for why this is an event filter on
-        # the header's viewport rather than a header subclass.
-        self._column_toggle_filter = _ColumnToggleFilter(self.table, self)
-        hheader.viewport().installEventFilter(self._column_toggle_filter)
+        # A second plain click on an already-selected column deselects it,
+        # and double-clicking a section border auto-fits that column to
+        # its content -- see _HeaderInteractionFilter for why this is an
+        # event filter on the header's viewport rather than a header
+        # subclass.
+        self._header_filter = _HeaderInteractionFilter(self.table, self._auto_fit_column, self)
+        hheader.viewport().installEventFilter(self._header_filter)
         # Selected cells still get their BackgroundRole re-queried and
         # painted (see _NoHighlightDelegate) instead of the style's flat
         # Highlight-palette color, so they can be a shade of their own
@@ -619,6 +660,39 @@ class DatasetTableView(QWidget):
             width = min(c.MAX_COL_WIDTH, max(c.MIN_COL_WIDTH, len(label) * 9 + 30))
             header.resizeSection(i, width)
 
+    def _auto_fit_column(self, logical: int) -> None:
+        """Resizes column ``logical`` to fit its header label and its
+        currently-loaded/visible cell values, plus a little padding --
+        deliberately not ``QTableView.resizeColumnToContents``, which
+        measures every row in the model: fine for an ordinary table, but
+        this one is built to stay responsive over arbitrarily large
+        datasets (see the module docstring), so it only measures what's
+        actually already on screen/in memory instead of forcing a full
+        column scan.
+        """
+        if self._table_model is None or self._source is None:
+            return
+        header = self.table.horizontalHeader()
+        fm = QFontMetrics(self.table.font())
+        layout = self._table_model.layout_info
+        max_px = fm.horizontalAdvance(layout.labels[logical])
+
+        top_row = self.table.rowAt(0)
+        bottom_row = self.table.rowAt(max(0, self.table.viewport().height() - 1))
+        if top_row < 0:
+            top_row = 0
+        if bottom_row < 0:
+            bottom_row = min(top_row + 100, self._table_model.rowCount() - 1)
+        if bottom_row >= top_row:
+            arr, _missing = self._source.get_available(top_row, bottom_row + 1)
+            if arr is not None:
+                for row in arr[:, logical]:
+                    max_px = max(max_px, fm.horizontalAdvance(_format_cell(row)))
+
+        padding = 24
+        width = min(_AUTOFIT_MAX_WIDTH, max(c.MIN_COL_WIDTH, max_px + padding))
+        header.resizeSection(logical, width)
+
     # -- navigation ------------------------------------------------------
 
     def _go_home(self) -> None:
@@ -672,13 +746,8 @@ class DatasetTableView(QWidget):
                 background-color: {palette.header_bg};
                 color: {palette.subtext};
                 border: none;
-                padding: 4px 8px;
-            }}
-            QHeaderView::section:horizontal {{
                 border-bottom: 2px solid {palette.accent};
-            }}
-            QHeaderView::section:vertical {{
-                border-bottom: 1px solid {palette.grid_line};
+                padding: 4px 8px;
             }}
             """
         )

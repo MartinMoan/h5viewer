@@ -37,9 +37,23 @@ def _shape_summary(node: NodeInfo) -> str:
 
 
 class HierarchyTree(QWidget):
-    def __init__(self, theme: ThemeManager, on_select: Callable[[NodeInfo], None], parent=None):
+    def __init__(
+        self,
+        theme: ThemeManager,
+        on_select: Callable[[NodeInfo], None],
+        on_activate: Optional[Callable[[NodeInfo], None]] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self._on_select = on_select
+        # Fired on double-click, in addition to (after) the selectionChanged
+        # -> on_select call the double-click's first press already
+        # triggers -- lets App distinguish "open as preview" (single
+        # click/keyboard nav, on_select) from "open pinned/permanent"
+        # (double-click, on_activate), VS Code-editor-tab style. Optional
+        # only so any other future embedder of this tree isn't forced to
+        # care about that distinction.
+        self._on_activate = on_activate
         self._model_ref: Optional[H5Model] = None
         self._items: dict[str, QStandardItem] = {}
         self._palette: Palette = theme.palette
@@ -75,6 +89,7 @@ class HierarchyTree(QWidget):
         self.tree.expanded.connect(self._on_expanded)
         self.tree.collapsed.connect(self._on_collapsed)
         self.tree.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self.tree.doubleClicked.connect(self._on_double_clicked)
 
         theme.register(self._apply_palette)
 
@@ -216,6 +231,14 @@ class HierarchyTree(QWidget):
         node = item.data(NODE_ROLE)
         if node is not None:
             self._on_select(node)
+
+    def _on_double_clicked(self, index) -> None:
+        item = self.model.itemFromIndex(index)
+        if item is None:
+            return
+        node = item.data(NODE_ROLE)
+        if node is not None and self._on_activate is not None:
+            self._on_activate(node)
 
     def _apply_palette(self, palette: Palette) -> None:
         self._palette = palette

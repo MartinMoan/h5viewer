@@ -26,9 +26,21 @@ class ChartType(str, Enum):
 
 
 @dataclass(frozen=True)
+class SeriesSpec:
+    chart_type: ChartType
+    # Which Y axis this series plots against -- "left" (the default,
+    # shared primary axis) or "right" (a second, independently-scaled
+    # axis overlaid on the same plot area). Only meaningful for
+    # non-Histogram series; a Histogram series always gets its own
+    # separate Count subplot regardless of this field (see
+    # build_plotly_spec), so the axis choice is ignored for it.
+    axis: str = "left"
+
+
+@dataclass(frozen=True)
 class GraphConfig:
     x_column: int
-    series: dict  # {column_index: ChartType}
+    series: dict  # {column_index: SeriesSpec}
 
 
 def fetch_columns(
@@ -75,15 +87,21 @@ def build_plotly_spec(labels: list, config: GraphConfig, arrays: dict, palette: 
 
     Line/Scatter/Bar series share one set of axes, rows sorted ascending
     by the X column (Plotly draws 'lines' traces in array order, not
-    sorted by x, so an unsorted X column would render as a zig-zag).
-    Histogram series -- which bin a column's own values and have no
-    meaningful pairing with an X column -- get a separate subplot stacked
-    below, overlaid together. If every series is a Histogram, the primary
-    axes are skipped entirely.
+    sorted by x, so an unsorted X column would render as a zig-zag) --
+    except that a series marked ``axis="right"`` (see SeriesSpec) plots
+    against a second, independently-scaled Y axis overlaid on the same
+    plot area instead, for pairing columns with very different value
+    ranges (e.g. temperature and pressure) without one of them flattening
+    into a barely-visible line. Histogram series -- which bin a column's
+    own values and have no meaningful pairing with an X column -- get a
+    separate subplot stacked below, overlaid together. If every series is
+    a Histogram, the primary axes are skipped entirely.
     """
     x_col = config.x_column
-    primary_cols = [col for col, kind in config.series.items() if kind != ChartType.HISTOGRAM]
-    hist_cols = [col for col, kind in config.series.items() if kind == ChartType.HISTOGRAM]
+    primary_cols = [col for col, spec in config.series.items() if spec.chart_type != ChartType.HISTOGRAM]
+    hist_cols = [col for col, spec in config.series.items() if spec.chart_type == ChartType.HISTOGRAM]
+    right_cols = [col for col in primary_cols if config.series[col].axis == "right"]
+    left_cols = [col for col in primary_cols if col not in right_cols]
 
     data = []
 
@@ -92,17 +110,17 @@ def build_plotly_spec(labels: list, config: GraphConfig, arrays: dict, palette: 
         order = np.argsort(x_values)
         sorted_x = x_values[order]
         for col in primary_cols:
+            spec = config.series[col]
             trace = {
                 "name": labels[col],
                 "x": sorted_x.tolist(),
                 "y": arrays[col][order].tolist(),
                 "marker": {"color": palette.chart_color(col)},
                 "line": {"color": palette.chart_color(col)},
+                "xaxis": "x",
+                "yaxis": "y3" if col in right_cols else "y",
             }
-            trace.update(_trace_type_mode(config.series[col]))
-            if hist_cols:
-                trace["xaxis"] = "x"
-                trace["yaxis"] = "y"
+            trace.update(_trace_type_mode(spec.chart_type))
             data.append(trace)
 
     for col in hist_cols:
@@ -118,12 +136,17 @@ def build_plotly_spec(labels: list, config: GraphConfig, arrays: dict, palette: 
             trace["yaxis"] = "y2"
         data.append(trace)
 
-    # A single series gets its column name as the axis title directly;
-    # multiple series sharing one axis have no single unambiguous title,
-    # so that axis is left untitled and disambiguated via the legend
-    # (always shown, see _base_layout) and the hover tooltip instead.
+    # A single series on an axis gets its column name -- and, since the
+    # color is then unambiguous too, its column's chart color -- as that
+    # axis's title directly; multiple series sharing one axis have no
+    # single unambiguous title/color, so that axis is left neutral and
+    # disambiguated via the legend (always shown, see _base_layout) and
+    # the hover tooltip instead.
     x_title = labels[x_col]
-    primary_y_title = labels[primary_cols[0]] if len(primary_cols) == 1 else None
+    left_y_title = labels[left_cols[0]] if len(left_cols) == 1 else None
+    left_accent = palette.chart_color(left_cols[0]) if len(left_cols) == 1 else None
+    right_y_title = labels[right_cols[0]] if len(right_cols) == 1 else None
+    right_accent = palette.chart_color(right_cols[0]) if len(right_cols) == 1 else None
     hist_x_title = labels[hist_cols[0]] if len(hist_cols) == 1 else None
 
     layout = _base_layout(palette)
@@ -131,14 +154,18 @@ def build_plotly_spec(labels: list, config: GraphConfig, arrays: dict, palette: 
         # Two stacked subplots: primary group on top, histograms below.
         layout["grid"] = {"rows": 2, "columns": 1, "pattern": "independent"}
         layout["xaxis"] = {**_x_axis_style(palette, x_title), "domain": [0, 1], "anchor": "y"}
-        layout["yaxis"] = {**_axis_style(palette, primary_y_title), "domain": [0.55, 1], "anchor": "x"}
+        layout["yaxis"] = {**_axis_style(palette, left_y_title, left_accent), "domain": [0.55, 1], "anchor": "x"}
         layout["xaxis2"] = {**_x_axis_style(palette, hist_x_title), "domain": [0, 1], "anchor": "y2"}
         layout["yaxis2"] = {**_axis_style(palette, "Count"), "domain": [0, 0.4], "anchor": "x2"}
+        if right_cols:
+            layout["yaxis3"] = _secondary_y_axis_style(palette, right_y_title, right_accent)
         layout["hovermode"] = "x unified"
         layout["barmode"] = "overlay"
     elif primary_cols:
         layout["xaxis"] = _x_axis_style(palette, x_title)
-        layout["yaxis"] = _axis_style(palette, primary_y_title)
+        layout["yaxis"] = _axis_style(palette, left_y_title, left_accent)
+        if right_cols:
+            layout["yaxis3"] = _secondary_y_axis_style(palette, right_y_title, right_accent)
         layout["hovermode"] = "x unified"
     else:
         layout["xaxis"] = _x_axis_style(palette, hist_x_title)
@@ -148,16 +175,29 @@ def build_plotly_spec(labels: list, config: GraphConfig, arrays: dict, palette: 
     return {"data": data, "layout": layout}
 
 
-def _axis_style(palette: Palette, title: str | None = None) -> dict:
+def _axis_style(palette: Palette, title: str | None = None, accent: str | None = None) -> dict:
     style = {
         "gridcolor": palette.grid_line,
         "zerolinecolor": palette.grid_line,
-        "color": palette.text,
-        "linecolor": palette.grid_line,
+        "color": accent or palette.text,
+        "linecolor": accent or palette.grid_line,
     }
     if title:
-        style["title"] = {"text": title, "font": {"color": palette.subtext}}
+        style["title"] = {"text": title, "font": {"color": accent or palette.subtext}}
     return style
+
+
+def _secondary_y_axis_style(palette: Palette, title: str | None, accent: str | None) -> dict:
+    return {
+        **_axis_style(palette, title, accent),
+        "overlaying": "y",
+        "side": "right",
+        "anchor": "x",
+        # The left axis' own gridlines already mark the plot's horizontal
+        # scale; a second set at this axis' different scale would just
+        # crisscross the first rather than add information.
+        "showgrid": False,
+    }
 
 
 def _x_axis_style(palette: Palette, title: str | None = None) -> dict:

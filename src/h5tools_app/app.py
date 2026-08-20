@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 from .constants import APP_NAME
 from .core.h5_model import DATASET, H5Model, H5ModelError, NodeInfo
 from .theme import Palette, ThemeManager
-from .widgets.dataset_table import DatasetTableView
+from .widgets.dataset_tabs import DatasetTabsView
 from .widgets.file_open_dialog import FileOpenDialog
 from .widgets.frameless import FramelessWindowMixin
 from .widgets.group_panel import GroupPanel
@@ -93,8 +93,8 @@ class App(FramelessWindowMixin, QWidget):
 
         self.status_bar = StatusBar(self.theme)
         outer.addWidget(self.status_bar)
-        self.table_view.context_changed.connect(self.status_bar.set_context)
-        self.table_view.error_message.connect(lambda msg: self.status_bar.set_message(msg, is_error=True))
+        self.dataset_tabs.context_changed.connect(self.status_bar.set_context)
+        self.dataset_tabs.error_message.connect(lambda msg: self.status_bar.set_message(msg, is_error=True))
 
         # A resize cursor set on this widget (see mouseMoveEvent below,
         # only meant for the few pixels of bare margin around the window
@@ -130,17 +130,23 @@ class App(FramelessWindowMixin, QWidget):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(6)
 
-        self.tree = HierarchyTree(self.theme, on_select=self._on_node_selected)
+        self.tree = HierarchyTree(
+            self.theme, on_select=self._on_node_selected, on_activate=self._on_node_activated
+        )
         self.splitter.addWidget(self.tree)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self.group_panel = GroupPanel(self.theme, on_child_activate=self._activate_path)
-        self.table_view = DatasetTableView(self.theme)
+        self.group_panel = GroupPanel(
+            self.theme,
+            on_child_activate=self._activate_path,
+            on_child_double_activate=self._activate_path_permanent,
+        )
+        self.dataset_tabs = DatasetTabsView(self.theme)
         self.right_stack = QStackedWidget()
         self.right_stack.addWidget(self.group_panel)
-        self.right_stack.addWidget(self.table_view)
+        self.right_stack.addWidget(self.dataset_tabs)
         right_layout.addWidget(self.right_stack)
         self.splitter.addWidget(right)
 
@@ -167,7 +173,7 @@ class App(FramelessWindowMixin, QWidget):
             return
 
         if self.model is not None:
-            self.table_view.clear()
+            self.dataset_tabs.clear_all()
             self.model.close()
 
         self.model = new_model
@@ -182,28 +188,53 @@ class App(FramelessWindowMixin, QWidget):
         if self.model is None:
             return
         if node.kind == DATASET:
-            try:
-                self.table_view.load(self.model, node.path)
-            except H5ModelError as exc:
-                self.status_bar.set_message(str(exc), is_error=True)
-                return
-            self.right_stack.setCurrentWidget(self.table_view)
+            self._open_dataset(node, permanent=False)
         else:
-            # Not table_view.clear() -- that would tear down its loaded
-            # DatasetSource for no reason just because the user is
-            # momentarily looking at a different node; only the status-bar
-            # context line (which described the dataset table, now hidden)
-            # needs to go quiet.
+            # Not dataset_tabs.clear_all() -- that would tear down every
+            # loaded tab for no reason just because the user is
+            # momentarily looking at a different node; only the
+            # status-bar context line (which described whichever dataset
+            # tab was active, now hidden) needs to go quiet.
             self.status_bar.set_context("")
             self.group_panel.show_node(self.model, node)
             self.right_stack.setCurrentWidget(self.group_panel)
 
+    def _on_node_activated(self, node: NodeInfo) -> None:
+        # Tree double-click -- see HierarchyTree's on_activate. Groups
+        # already expand/collapse on double-click via Qt's own default
+        # QTreeView behavior; this only has anything to do for datasets.
+        if self.model is None or node.kind != DATASET:
+            return
+        self._open_dataset(node, permanent=True)
+
+    def _open_dataset(self, node: NodeInfo, permanent: bool) -> None:
+        try:
+            self.dataset_tabs.open_dataset(self.model, node, node.path, permanent=permanent)
+        except H5ModelError as exc:
+            self.status_bar.set_message(str(exc), is_error=True)
+            return
+        self.right_stack.setCurrentWidget(self.dataset_tabs)
+
     def _activate_path(self, path: str) -> None:
         self.tree.select_path(path)
 
+    def _activate_path_permanent(self, path: str) -> None:
+        # Group panel's child-row double-click -- mirrors
+        # _on_node_activated for datasets reached this way instead of via
+        # the tree directly. select_path already fires _on_node_selected
+        # (a preview open) through the tree's own selectionChanged; this
+        # then pins/promotes that same dataset to a permanent tab, the
+        # same order double-clicking a tree row happens in.
+        self.tree.select_path(path)
+        if self.model is None:
+            return
+        node = self.model.node_info(path)
+        if node.kind == DATASET:
+            self._open_dataset(node, permanent=True)
+
     def closeEvent(self, event) -> None:
         self._teardown_frameless()
-        self.table_view.clear()
+        self.dataset_tabs.clear_all()
         if self.model is not None:
             self.model.close()
         super().closeEvent(event)

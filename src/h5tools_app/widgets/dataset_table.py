@@ -746,8 +746,13 @@ class DatasetTableView(QWidget):
                 background-color: {palette.header_bg};
                 color: {palette.subtext};
                 border: none;
-                border-bottom: 2px solid {palette.accent};
                 padding: 4px 8px;
+            }}
+            QHeaderView::section:horizontal {{
+                border-bottom: 2px solid {palette.accent};
+            }}
+            QHeaderView::section:vertical {{
+                border-bottom: 1px solid {palette.grid_line};
             }}
             """
         )

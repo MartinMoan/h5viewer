@@ -29,18 +29,16 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLayout,
     QSplitter,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from .constants import APP_NAME
-from .core.h5_model import DATASET, H5Model, H5ModelError, NodeInfo
+from .core.h5_model import H5Model, H5ModelError, NodeInfo
 from .theme import Palette, ThemeManager
 from .widgets.dataset_tabs import DatasetTabsView
 from .widgets.file_open_dialog import FileOpenDialog
 from .widgets.frameless import FramelessWindowMixin
-from .widgets.group_panel import GroupPanel
 from .widgets.hierarchy_tree import HierarchyTree
 from .widgets.status_bar import StatusBar
 from .widgets.title_bar import BAR_HEIGHT, TitleBar
@@ -138,16 +136,12 @@ class App(FramelessWindowMixin, QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self.group_panel = GroupPanel(
+        self.dataset_tabs = DatasetTabsView(
             self.theme,
             on_child_activate=self._activate_path,
             on_child_double_activate=self._activate_path_permanent,
         )
-        self.dataset_tabs = DatasetTabsView(self.theme)
-        self.right_stack = QStackedWidget()
-        self.right_stack.addWidget(self.group_panel)
-        self.right_stack.addWidget(self.dataset_tabs)
-        right_layout.addWidget(self.right_stack)
+        right_layout.addWidget(self.dataset_tabs)
         self.splitter.addWidget(right)
 
         self.splitter.setStretchFactor(0, 0)
@@ -187,50 +181,38 @@ class App(FramelessWindowMixin, QWidget):
     def _on_node_selected(self, node: NodeInfo) -> None:
         if self.model is None:
             return
-        if node.kind == DATASET:
-            self._open_dataset(node, permanent=False)
-        else:
-            # Not dataset_tabs.clear_all() -- that would tear down every
-            # loaded tab for no reason just because the user is
-            # momentarily looking at a different node; only the
-            # status-bar context line (which described whichever dataset
-            # tab was active, now hidden) needs to go quiet.
-            self.status_bar.set_context("")
-            self.group_panel.show_node(self.model, node)
-            self.right_stack.setCurrentWidget(self.group_panel)
+        self._open_node(node, permanent=False)
 
     def _on_node_activated(self, node: NodeInfo) -> None:
         # Tree double-click -- see HierarchyTree's on_activate. Groups
-        # already expand/collapse on double-click via Qt's own default
-        # QTreeView behavior; this only has anything to do for datasets.
-        if self.model is None or node.kind != DATASET:
+        # still also expand/collapse on double-click via Qt's own default
+        # QTreeView behavior; this additionally pins the group's own tab,
+        # same as it does for datasets.
+        if self.model is None:
             return
-        self._open_dataset(node, permanent=True)
+        self._open_node(node, permanent=True)
 
-    def _open_dataset(self, node: NodeInfo, permanent: bool) -> None:
+    def _open_node(self, node: NodeInfo, permanent: bool) -> None:
         try:
-            self.dataset_tabs.open_dataset(self.model, node, node.path, permanent=permanent)
+            self.dataset_tabs.open_node(self.model, node, permanent=permanent)
         except H5ModelError as exc:
             self.status_bar.set_message(str(exc), is_error=True)
-            return
-        self.right_stack.setCurrentWidget(self.dataset_tabs)
 
     def _activate_path(self, path: str) -> None:
         self.tree.select_path(path)
 
     def _activate_path_permanent(self, path: str) -> None:
         # Group panel's child-row double-click -- mirrors
-        # _on_node_activated for datasets reached this way instead of via
-        # the tree directly. select_path already fires _on_node_selected
-        # (a preview open) through the tree's own selectionChanged; this
-        # then pins/promotes that same dataset to a permanent tab, the
-        # same order double-clicking a tree row happens in.
+        # _on_node_activated reached this way instead of via the tree
+        # directly. select_path already fires _on_node_selected (a
+        # preview open) through the tree's own selectionChanged; this
+        # then pins/promotes that same node to a permanent tab, the same
+        # order double-clicking a tree row happens in.
         self.tree.select_path(path)
         if self.model is None:
             return
         node = self.model.node_info(path)
-        if node.kind == DATASET:
-            self._open_dataset(node, permanent=True)
+        self._open_node(node, permanent=True)
 
     def closeEvent(self, event) -> None:
         self._teardown_frameless()

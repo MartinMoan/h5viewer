@@ -19,7 +19,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from .. import constants as c
-from ..core.plotting import GraphConfig, build_plotly_spec
+from ..core.plotting import MapConfig, build_map_plotly_spec, build_plotly_spec
 from ..theme import Palette, ThemeManager
 from .frameless import FramelessWindowMixin
 from .status_bar import StatusBar
@@ -105,6 +105,7 @@ _SKELETON_HTML = f"""
     Plotly.relayout(gd, {{
       'xaxis.autorange': true, 'yaxis.autorange': true,
       'xaxis2.autorange': true, 'yaxis2.autorange': true,
+      'xaxis4.autorange': true, 'yaxis4.autorange': true,
       'yaxis3.autorange': true
     }});
   }}
@@ -127,7 +128,7 @@ class GraphWindow(FramelessWindowMixin, QWidget):
         self,
         theme: ThemeManager,
         labels: dict,
-        config: GraphConfig,
+        config,  # GraphConfig or MapConfig -- see _render()
         arrays: dict,
         truncated: bool,
         total_rows: int,
@@ -230,7 +231,10 @@ class GraphWindow(FramelessWindowMixin, QWidget):
     def _render(self) -> None:
         if not self._loaded:
             return
-        spec = build_plotly_spec(self._labels, self._config, self._arrays, self._palette)
+        if isinstance(self._config, MapConfig):
+            spec = build_map_plotly_spec(self._labels, self._config, self._arrays, self._palette)
+        else:
+            spec = build_plotly_spec(self._labels, self._config, self._arrays, self._palette)
         p = self._palette
         script = (
             f"Plotly.react('chart', {json.dumps(spec['data'])}, "

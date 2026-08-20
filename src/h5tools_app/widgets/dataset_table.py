@@ -571,7 +571,7 @@ class DatasetTableView(QWidget):
         if config is None:
             return
 
-        col_indices = [config.x_column, *config.series.keys()]
+        col_indices = config.columns_used()
         arrays, truncated = fetch_columns(self._source.dataset, layout, col_indices)
         dataset_path = self._last_context[1] if self._last_context is not None else ""
         window = GraphWindow(

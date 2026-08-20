@@ -1,9 +1,18 @@
 import json
 
 import numpy as np
+import pytest
 
 from h5tools_app.core.h5_model import H5Model
-from h5tools_app.core.plotting import ChartType, GraphConfig, SeriesSpec, build_plotly_spec, fetch_columns
+from h5tools_app.core.plotting import (
+    ChartType,
+    GraphConfig,
+    MapConfig,
+    SeriesSpec,
+    build_map_plotly_spec,
+    build_plotly_spec,
+    fetch_columns,
+)
 from h5tools_app.theme import Palette
 
 
@@ -183,3 +192,244 @@ def test_build_plotly_spec_always_shows_legend():
     config = GraphConfig(x_column=0, series={1: SeriesSpec(ChartType.LINE)})
     spec = build_plotly_spec(["x", "y"], config, arrays, _palette())
     assert spec["layout"]["showlegend"] is True
+
+
+def test_build_plotly_spec_area_fills_to_zero():
+    arrays = {0: np.array([1.0, 2.0, 3.0]), 1: np.array([3.0, 1.0, 2.0])}
+    config = GraphConfig(x_column=0, series={1: SeriesSpec(ChartType.AREA)})
+    spec = build_plotly_spec(["x", "y"], config, arrays, _palette())
+    trace = spec["data"][0]
+    assert trace["type"] == "scatter" and trace["mode"] == "lines"
+    assert trace["fill"] == "tozeroy"
+    assert trace["fillcolor"].startswith("rgba(")
+
+
+def test_build_plotly_spec_box_and_violin_share_a_subplot():
+    arrays = {0: np.array([1.0, 2.0]), 1: np.array([1.0, 2.0, 3.0]), 2: np.array([4.0, 5.0, 6.0])}
+    config = GraphConfig(x_column=0, series={1: SeriesSpec(ChartType.BOX), 2: SeriesSpec(ChartType.VIOLIN)})
+    spec = build_plotly_spec(["x", "box_col", "violin_col"], config, arrays, _palette())
+    by_name = {t["name"]: t for t in spec["data"]}
+    assert by_name["box_col"]["type"] == "box"
+    assert by_name["box_col"]["y"] == [1.0, 2.0, 3.0]
+    assert by_name["violin_col"]["type"] == "violin"
+    # No primary series -- alone, they take over the base (unnumbered)
+    # axis pair, same as a lone Histogram would.
+    assert by_name["box_col"]["xaxis"] == "x"
+    assert by_name["violin_col"]["xaxis"] == "x"
+    assert "xaxis2" not in spec["layout"]
+
+
+def test_build_plotly_spec_primary_hist_and_boxviolin_get_distinct_axes():
+    arrays = {col: np.array([1.0, 2.0, 3.0]) for col in range(4)}
+    config = GraphConfig(
+        x_column=0,
+        series={
+            1: SeriesSpec(ChartType.LINE),
+            2: SeriesSpec(ChartType.HISTOGRAM),
+            3: SeriesSpec(ChartType.BOX),
+        },
+    )
+    spec = build_plotly_spec(["x", "line_col", "hist_col", "box_col"], config, arrays, _palette())
+    by_name = {t["name"]: t for t in spec["data"]}
+    # Primary keeps the base pair, Histogram gets slot 2, Box gets slot 4
+    # -- 3 is reserved for the primary group's own right-axis overlay.
+    assert by_name["line_col"]["xaxis"] == "x" and by_name["line_col"]["yaxis"] == "y"
+    assert by_name["hist_col"]["xaxis"] == "x2" and by_name["hist_col"]["yaxis"] == "y2"
+    assert by_name["box_col"]["xaxis"] == "x4" and by_name["box_col"]["yaxis"] == "y4"
+    assert spec["layout"]["grid"] == {"rows": 3, "columns": 1, "pattern": "independent"}
+
+
+def test_build_plotly_spec_scatter_color_and_size_by():
+    arrays = {
+        0: np.array([1.0, 2.0, 3.0]),
+        1: np.array([10.0, 20.0, 30.0]),
+        2: np.array([0.0, 5.0, 10.0]),
+        3: np.array([1.0, 2.0, 3.0]),
+    }
+    config = GraphConfig(
+        x_column=0, series={1: SeriesSpec(ChartType.SCATTER, color_by=2, size_by=3)}
+    )
+    spec = build_plotly_spec(["x", "y", "temp", "weight"], config, arrays, _palette())
+    marker = spec["data"][0]["marker"]
+    assert marker["color"] == [0.0, 5.0, 10.0]
+    assert marker["colorscale"] == "Viridis"
+    assert marker["colorbar"]["title"]["text"] == "weight" or marker["colorbar"]["title"]["text"] == "temp"
+    # size_by is sqrt-area-scaled into a fixed px range, not a raw copy.
+    assert len(marker["size"]) == 3
+    assert min(marker["size"]) >= 6.0 and max(marker["size"]) <= 24.0
+    assert marker["size"][0] < marker["size"][2]  # monotonic with the underlying values
+
+
+def test_build_plotly_spec_bar_mode_defaults_to_group_and_honors_stack():
+    arrays = {0: np.array([1.0, 2.0]), 1: np.array([1.0, 2.0]), 2: np.array([3.0, 4.0])}
+    config = GraphConfig(x_column=0, series={1: SeriesSpec(ChartType.BAR), 2: SeriesSpec(ChartType.BAR)})
+    spec = build_plotly_spec(["x", "a", "b"], config, arrays, _palette())
+    assert spec["layout"]["barmode"] == "group"
+
+    config = GraphConfig(
+        x_column=0,
+        series={1: SeriesSpec(ChartType.BAR), 2: SeriesSpec(ChartType.BAR)},
+        bar_mode="stack",
+    )
+    spec = build_plotly_spec(["x", "a", "b"], config, arrays, _palette())
+    assert spec["layout"]["barmode"] == "stack"
+
+
+def test_build_plotly_spec_log_scale_axes():
+    arrays = {0: np.array([1.0, 2.0]), 1: np.array([3.0, 4.0]), 2: np.array([300.0, 400.0])}
+    config = GraphConfig(
+        x_column=0,
+        series={1: SeriesSpec(ChartType.LINE, axis="left"), 2: SeriesSpec(ChartType.LINE, axis="right")},
+        log_x=True,
+        log_y_left=True,
+        log_y_right=True,
+    )
+    spec = build_plotly_spec(["x", "a", "b"], config, arrays, _palette())
+    assert spec["layout"]["xaxis"]["type"] == "log"
+    assert spec["layout"]["yaxis"]["type"] == "log"
+    assert spec["layout"]["yaxis3"]["type"] == "log"
+
+
+def test_graph_config_columns_used_includes_color_and_size_by():
+    config = GraphConfig(
+        x_column=0,
+        series={1: SeriesSpec(ChartType.SCATTER, color_by=2, size_by=3), 4: SeriesSpec(ChartType.LINE)},
+    )
+    assert set(config.columns_used()) == {0, 1, 2, 3, 4}
+
+
+def _map_arrays():
+    return {
+        0: np.array([10.0, 10.5, 11.0]),  # lat
+        1: np.array([20.0, 20.5, 21.0]),  # lon
+        2: np.array([1.0, 2.0, 3.0]),  # color-by
+        3: np.array([1.0, 4.0, 9.0]),  # size-by
+    }
+
+
+def test_build_map_plotly_spec_converts_radians_to_degrees():
+    import math
+
+    arrays = {
+        0: np.array([math.radians(10.0), math.radians(11.0)]),  # lat
+        1: np.array([math.radians(20.0), math.radians(21.0)]),  # lon
+    }
+    config = MapConfig(lat_column=0, lon_column=1, lat_lon_units="radians")
+    spec = build_map_plotly_spec(["lat", "lon"], config, arrays, _palette())
+    x, y = spec["data"][0]["x"], spec["data"][0]["y"]
+    assert x == pytest.approx([20.0, 21.0])
+    assert y == pytest.approx([10.0, 11.0])
+
+
+def test_build_map_plotly_spec_degrees_is_the_default_and_unchanged():
+    config = MapConfig(lat_column=0, lon_column=1)
+    assert config.lat_lon_units == "degrees"
+    spec = build_map_plotly_spec(["lat", "lon"], config, _map_arrays(), _palette())
+    assert spec["data"][0]["x"] == [20.0, 20.5, 21.0]
+    assert spec["data"][0]["y"] == [10.0, 10.5, 11.0]
+
+
+def test_build_map_plotly_spec_default_is_plain_cartesian_lon_lat():
+    # Never scattergeo/mapbox -- both need a CDN fetch for map-outline/
+    # tile data at render time even out of a "full" plotly.min.js
+    # bundle, which breaks in this app's fully-offline QWebEngineView.
+    config = MapConfig(lat_column=0, lon_column=1)
+    spec = build_map_plotly_spec(["lat", "lon"], config, _map_arrays(), _palette())
+    assert spec["data"][0]["type"] == "scatter"
+    assert spec["data"][0]["mode"] == "markers"
+    assert spec["data"][0]["x"] == [20.0, 20.5, 21.0]
+    assert spec["data"][0]["y"] == [10.0, 10.5, 11.0]
+    assert spec["layout"]["xaxis"]["title"]["text"] == "Longitude"
+    assert spec["layout"]["yaxis"]["title"]["text"] == "Latitude"
+    assert spec["layout"]["yaxis"]["scaleanchor"] == "x"
+    assert "geo" not in spec["layout"]
+    assert "images" not in spec["layout"]
+
+
+def test_build_map_plotly_spec_connect_points_draws_lines():
+    config = MapConfig(lat_column=0, lon_column=1, connect_points=True)
+    spec = build_map_plotly_spec(["lat", "lon"], config, _map_arrays(), _palette())
+    assert spec["data"][0]["mode"] == "lines+markers"
+
+
+def test_build_map_plotly_spec_color_and_size_by():
+    config = MapConfig(lat_column=0, lon_column=1, color_by=2, size_by=3)
+    spec = build_map_plotly_spec(["lat", "lon", "depth", "weight"], config, _map_arrays(), _palette())
+    marker = spec["data"][0]["marker"]
+    assert marker["color"] == [1.0, 2.0, 3.0]
+    assert marker["colorscale"] == "Viridis"
+    assert len(marker["size"]) == 3
+
+
+def test_build_map_plotly_spec_with_vector_geojson_basemap(tmp_path):
+    geojson_path = tmp_path / "coast.geojson"
+    geojson_path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[20.0, 10.0], [21.0, 11.0]]}}
+                ],
+            }
+        )
+    )
+    config = MapConfig(lat_column=0, lon_column=1, basemap_path=str(geojson_path))
+    spec = build_map_plotly_spec(["lat", "lon"], config, _map_arrays(), _palette())
+    # Same cartesian backend as always -- one extra trace for the
+    # coastline plus the track itself, no images (that's raster-only).
+    assert len(spec["data"]) == 2
+    assert spec["data"][0]["type"] == "scatter"
+    assert spec["data"][1]["type"] == "scatter"
+    assert "images" not in spec["layout"]
+
+
+def test_build_map_plotly_spec_filters_out_far_away_geojson_geometry(tmp_path):
+    # A big GeoJSON file (e.g. a whole coastline) with one feature right
+    # where the data is, and one feature nowhere near it -- only the
+    # nearby one should make it into the spec; embedding the whole file
+    # regardless of the data's own area was the reported performance bug.
+    geojson_path = tmp_path / "world.geojson"
+    geojson_path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": {"type": "LineString", "coordinates": [[20.0, 10.0], [21.0, 11.0]]},
+                    },
+                    {
+                        "type": "Feature",
+                        "geometry": {"type": "LineString", "coordinates": [[150.0, -40.0], [151.0, -41.0]]},
+                    },
+                ],
+            }
+        )
+    )
+    config = MapConfig(lat_column=0, lon_column=1, basemap_path=str(geojson_path))
+    spec = build_map_plotly_spec(["lat", "lon"], config, _map_arrays(), _palette())
+    # Just the nearby coastline segment plus the track -- not the
+    # far-away one.
+    assert len(spec["data"]) == 2
+    assert spec["data"][0]["x"] == [20.0, 21.0]
+
+
+def test_build_map_plotly_spec_with_raster_basemap_uses_cartesian_backend(tmp_path):
+    from PIL import Image
+
+    img_path = tmp_path / "chart.png"
+    Image.new("RGB", (4, 4), color=(10, 20, 30)).save(img_path)
+    world_path = tmp_path / "chart.pgw"
+    # 6-line affine world file: pixel size x, rotation, rotation, pixel
+    # size y (negative -- north-up), top-left X, top-left Y.
+    world_path.write_text("0.01\n0\n0\n-0.01\n20.0\n11.0\n")
+
+    config = MapConfig(lat_column=0, lon_column=1, basemap_path=str(img_path))
+    spec = build_map_plotly_spec(["lat", "lon"], config, _map_arrays(), _palette())
+    assert spec["data"][0]["type"] == "scatter"
+    assert spec["data"][0]["x"] == [20.0, 20.5, 21.0]
+    assert spec["layout"]["yaxis"]["scaleanchor"] == "x"
+    image = spec["layout"]["images"][0]
+    assert image["source"].startswith("data:image/png;base64,")
+    assert image["x"] == 20.0
+    assert image["y"] == 11.0
